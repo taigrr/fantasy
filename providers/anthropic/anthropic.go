@@ -286,6 +286,8 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 	if providerOptions.SendReasoning != nil {
 		sendReasoning = *providerOptions.SendReasoning
 	}
+	// Add beta flags from provider options (e.g., for 1M context window on Bedrock).
+	betaFlags = append(betaFlags, providerOptions.Betas...)
 	systemBlocks, messages, warnings := toPrompt(call.Prompt, sendReasoning)
 
 	if call.FrequencyPenalty != nil {
