@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"slices"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 )
 
 // Global type identifiers for OpenAI Responses API-specific data.

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	"charm.land/x/vcr"
 	"github.com/stretchr/testify/require"
 )

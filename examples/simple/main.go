@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/openrouter"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/openrouter"
 )
 
 func main() {

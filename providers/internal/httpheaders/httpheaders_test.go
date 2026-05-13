@@ -15,8 +15,8 @@ func TestDefaultUserAgent(t *testing.T) {
 		version string
 		want    string
 	}{
-		{name: "basic version", version: "0.11.0", want: "Charm-Fantasy/0.11.0 (https://charm.land/fantasy)"},
-		{name: "another version", version: "1.0.0", want: "Charm-Fantasy/1.0.0 (https://charm.land/fantasy)"},
+		{name: "basic version", version: "0.11.0", want: "Charm-Fantasy/0.11.0 (https://github.com/taigrr/fantasy)"},
+		{name: "another version", version: "1.0.0", want: "Charm-Fantasy/1.0.0 (https://github.com/taigrr/fantasy)"},
 	}
 
 	for _, tt := range tests {

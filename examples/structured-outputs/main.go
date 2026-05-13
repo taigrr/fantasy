@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"os"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/object"
-	"charm.land/fantasy/providers/openai"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/object"
+	"github.com/taigrr/fantasy/providers/openai"
 )
 
 // Here's what we want the LLM to fill out. The struct tags tell the model

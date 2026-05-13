@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/kronk"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/kronk"
 )
 
 const modelURL = "Qwen/Qwen3-8B-GGUF/Qwen3-8B-Q8_0.gguf"

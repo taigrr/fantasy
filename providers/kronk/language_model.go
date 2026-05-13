@@ -6,8 +6,8 @@ import (
 	"errors"
 	"io"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/object"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/object"
 	"github.com/ardanlabs/kronk/sdk/kronk"
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	xjson "github.com/charmbracelet/x/json"

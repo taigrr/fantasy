@@ -1,8 +1,8 @@
 package anthropic
 
 import (
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/internal/httpheaders"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/internal/httpheaders"
 	"github.com/charmbracelet/anthropic-sdk-go/option"
 )
 

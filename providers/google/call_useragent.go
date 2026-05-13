@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/http"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/internal/httpheaders"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/internal/httpheaders"
 )
 
 type callUAKey struct{}

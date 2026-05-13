@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"reflect"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/schema"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/schema"
 )
 
 // Generate generates a structured object that matches the given type T.

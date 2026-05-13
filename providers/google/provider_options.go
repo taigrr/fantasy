@@ -4,7 +4,7 @@ package google
 import (
 	"encoding/json"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 )
 
 // Global type identifiers for Google-specific provider data.

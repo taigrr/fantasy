@@ -11,7 +11,7 @@ import (
 	"slices"
 	"sync"
 
-	"charm.land/fantasy/schema"
+	"github.com/taigrr/fantasy/schema"
 	"github.com/charmbracelet/x/exp/slice"
 )
 

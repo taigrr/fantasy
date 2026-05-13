@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"charm.land/fantasy/schema"
+	"github.com/taigrr/fantasy/schema"
 )
 
 // Schema represents a JSON schema for tool input validation.

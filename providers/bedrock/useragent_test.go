@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -53,7 +53,7 @@ func TestUserAgent(t *testing.T) {
 		_, _ = model.Generate(t.Context(), fantasy.Call{Prompt: prompt})
 
 		require.Len(t, *captured, 1)
-		assert.Equal(t, "Charm-Fantasy/"+fantasy.Version+" (https://charm.land/fantasy)", (*captured)[0]["User-Agent"])
+		assert.Equal(t, "Charm-Fantasy/"+fantasy.Version+" (https://github.com/taigrr/fantasy)", (*captured)[0]["User-Agent"])
 	})
 
 	t.Run("WithUserAgent wins over default", func(t *testing.T) {

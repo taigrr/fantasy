@@ -9,9 +9,9 @@ import (
 	"reflect"
 	"strings"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/object"
-	"charm.land/fantasy/schema"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/object"
+	"github.com/taigrr/fantasy/schema"
 	"github.com/charmbracelet/openai-go"
 	"github.com/charmbracelet/openai-go/packages/param"
 	"github.com/charmbracelet/openai-go/responses"

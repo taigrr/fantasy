@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/openai"
-	"charm.land/fantasy/providers/openaicompat"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/openai"
+	"github.com/taigrr/fantasy/providers/openaicompat"
 	"charm.land/x/vcr"
 	"github.com/stretchr/testify/require"
 )

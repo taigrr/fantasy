@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/bedrock"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/bedrock"
 	"charm.land/x/vcr"
 )
 

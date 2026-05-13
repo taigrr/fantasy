@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strings"
 
-	"charm.land/fantasy/jsonrepair"
+	"github.com/taigrr/fantasy/jsonrepair"
 	"github.com/kaptinlin/jsonschema"
 )
 

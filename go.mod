@@ -1,4 +1,4 @@
-module charm.land/fantasy
+module github.com/taigrr/fantasy
 
 go 1.26.2
 

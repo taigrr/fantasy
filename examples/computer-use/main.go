@@ -19,8 +19,8 @@ import (
 	"image/png"
 	"os"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/anthropic"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/anthropic"
 )
 
 // takeScreenshot is a stub that simulates capturing a screenshot.

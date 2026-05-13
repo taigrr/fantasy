@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	"github.com/ardanlabs/kronk/sdk/kronk"
 	"github.com/ardanlabs/kronk/sdk/tools/catalog"
 	"github.com/ardanlabs/kronk/sdk/tools/libs"

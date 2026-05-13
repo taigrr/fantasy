@@ -4,8 +4,8 @@ package openaicompat
 import (
 	"encoding/json"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/openai"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/openai"
 )
 
 // Global type identifiers for OpenAI-compatible provider data.

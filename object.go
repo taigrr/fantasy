@@ -7,7 +7,7 @@ import (
 	"iter"
 	"reflect"
 
-	"charm.land/fantasy/schema"
+	"github.com/taigrr/fantasy/schema"
 )
 
 // ObjectMode specifies how structured output should be generated.

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	"github.com/charmbracelet/anthropic-sdk-go"
 	"github.com/stretchr/testify/require"
 )

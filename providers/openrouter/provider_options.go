@@ -4,7 +4,7 @@ package openrouter
 import (
 	"encoding/json"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 )
 
 // ReasoningEffort represents the reasoning effort level for OpenRouter models.

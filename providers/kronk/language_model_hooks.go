@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 )
 

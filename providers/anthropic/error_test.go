@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 )
 
 func TestToProviderErr_WrapsUnexpectedEOF(t *testing.T) {

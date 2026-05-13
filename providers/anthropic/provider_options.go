@@ -4,7 +4,7 @@ package anthropic
 import (
 	"encoding/json"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 )
 
 // Effort represents the output effort level for Anthropic models.

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	"github.com/stretchr/testify/require"
 )
 

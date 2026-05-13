@@ -15,9 +15,9 @@ import (
 	"os"
 	"strings"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/anthropic"
-	"charm.land/fantasy/providers/openai"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/anthropic"
+	"github.com/taigrr/fantasy/providers/openai"
 )
 
 func main() {

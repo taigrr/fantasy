@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	anthropicsdk "github.com/charmbracelet/anthropic-sdk-go"
 	"github.com/charmbracelet/anthropic-sdk-go/packages/param"
 )

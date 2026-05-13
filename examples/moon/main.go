@@ -12,8 +12,8 @@ import (
 	"os"
 	"time"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/anthropic"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/anthropic"
 	"github.com/charmbracelet/lipgloss/v2"
 	"github.com/charmbracelet/lipgloss/v2/table"
 	"github.com/charmbracelet/log/v2"

@@ -2,8 +2,8 @@
 package bedrock
 
 import (
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/anthropic"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/anthropic"
 	"github.com/charmbracelet/anthropic-sdk-go/option"
 )
 

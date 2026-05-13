@@ -4,7 +4,7 @@ package vercel
 import (
 	"encoding/json"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 )
 
 // Global type identifiers for Vercel-specific provider data.

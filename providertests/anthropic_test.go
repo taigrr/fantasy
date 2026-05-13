@@ -7,8 +7,8 @@ import (
 	"os"
 	"testing"
 
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/anthropic"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/anthropic"
 	"charm.land/x/vcr"
 	"github.com/stretchr/testify/require"
 )

@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	"github.com/charmbracelet/openai-go"
 )
 

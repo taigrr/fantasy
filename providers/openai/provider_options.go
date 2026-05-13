@@ -4,7 +4,7 @@ package openai
 import (
 	"encoding/json"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	"github.com/charmbracelet/openai-go"
 )
 

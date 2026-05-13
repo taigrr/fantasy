@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strconv"
 
-	"charm.land/fantasy"
+	"github.com/taigrr/fantasy"
 	"google.golang.org/genai"
 )
 
