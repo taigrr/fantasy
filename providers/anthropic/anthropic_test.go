@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -176,9 +177,14 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 		require.Empty(t, warnings)
 	})
 
-	t.Run("should drop assistant messages with invalid tool input", func(t *testing.T) {
+	t.Run("should preserve tool_use block when input JSON is malformed", func(t *testing.T) {
 		t.Parallel()
 
+		// Anthropic's API rejects any request whose tool_result lacks a
+		// matching tool_use in the previous message. Dropping the tool_use
+		// because its input failed to parse leaves the next turn's
+		// tool_result orphaned and produces a 400. Emit the block with
+		// empty arguments instead, and surface the parse error as a warning.
 		prompt := fantasy.Prompt{
 			{
 				Role: fantasy.MessageRoleUser,
@@ -201,10 +207,56 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 		systemBlocks, messages, warnings := toPrompt(prompt, true)
 
 		require.Empty(t, systemBlocks)
-		require.Len(t, messages, 1, "should only have user message")
+		require.Len(t, messages, 2, "user + assistant — assistant must be preserved so tool_result can pair")
+		assistant := messages[1]
+		require.Equal(t, anthropic.MessageParamRoleAssistant, assistant.Role)
+		require.Len(t, assistant.Content, 1)
+		toolUse := assistant.Content[0].OfToolUse
+		require.NotNil(t, toolUse, "tool_use block should be emitted even when input is malformed")
+		require.Equal(t, "call_123", toolUse.ID)
+		require.Equal(t, "get_weather", toolUse.Name)
 		require.Len(t, warnings, 1)
 		require.Equal(t, fantasy.CallWarningTypeOther, warnings[0].Type)
-		require.Contains(t, warnings[0].Message, "dropping empty assistant message")
+		require.Contains(t, warnings[0].Message, "malformed input JSON")
+		require.Contains(t, warnings[0].Message, "call_123")
+	})
+
+	t.Run("should preserve tool_use block when input is empty", func(t *testing.T) {
+		t.Parallel()
+
+		// Some upstream providers (notably DeepSeek's anthropic-compat
+		// endpoint) emit tool_use blocks with empty input for parameterless
+		// tool calls. Treat empty input as {} rather than dropping the
+		// block, since the next turn's tool_result still needs its pair.
+		prompt := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: "Hi"},
+				},
+			},
+			{
+				Role: fantasy.MessageRoleAssistant,
+				Content: []fantasy.MessagePart{
+					fantasy.ToolCallPart{
+						ToolCallID: "call_empty",
+						ToolName:   "ping",
+						Input:      "",
+					},
+				},
+			},
+		}
+
+		systemBlocks, messages, warnings := toPrompt(prompt, true)
+
+		require.Empty(t, systemBlocks)
+		require.Empty(t, warnings, "empty input is a valid round-trip; no warning")
+		require.Len(t, messages, 2)
+		require.Equal(t, anthropic.MessageParamRoleAssistant, messages[1].Role)
+		toolUse := messages[1].Content[0].OfToolUse
+		require.NotNil(t, toolUse)
+		require.Equal(t, "call_empty", toolUse.ID)
+		require.Equal(t, "ping", toolUse.Name)
 	})
 
 	t.Run("should keep assistant messages with reasoning and text", func(t *testing.T) {
@@ -607,6 +659,63 @@ func newAnthropicStreamingServer(chunks []string) (*httptest.Server, <-chan anth
 	return server, calls
 }
 
+func anthropicSSEEvent(event, data string) string {
+	return fmt.Sprintf("event: %s\ndata: %s\n\n", event, data)
+}
+
+func collectAnthropicStreamParts(stream fantasy.StreamResponse) []fantasy.StreamPart {
+	var parts []fantasy.StreamPart
+	stream(func(part fantasy.StreamPart) bool {
+		parts = append(parts, part)
+		return true
+	})
+	return parts
+}
+
+func streamAnthropicParts(t *testing.T, chunks []string, tools ...fantasy.Tool) []fantasy.StreamPart {
+	t.Helper()
+
+	server, calls := newAnthropicStreamingServer(chunks)
+	defer server.Close()
+
+	provider, err := New(
+		WithAPIKey("test-api-key"),
+		WithBaseURL(server.URL),
+	)
+	require.NoError(t, err)
+
+	model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	stream, err := model.Stream(context.Background(), fantasy.Call{
+		Prompt: testPrompt(),
+		Tools:  tools,
+	})
+	require.NoError(t, err)
+
+	parts := collectAnthropicStreamParts(stream)
+	_ = awaitAnthropicCall(t, calls)
+	return parts
+}
+
+func requireReasoningMetadata(t *testing.T, metadata fantasy.ProviderMetadata) *ReasoningOptionMetadata {
+	t.Helper()
+
+	reasoning := GetReasoningMetadata(fantasy.ProviderOptions(metadata))
+	require.NotNil(t, reasoning)
+	return reasoning
+}
+
+func streamPartsByType(parts []fantasy.StreamPart, typ fantasy.StreamPartType) []fantasy.StreamPart {
+	var matches []fantasy.StreamPart
+	for _, part := range parts {
+		if part.Type == typ {
+			matches = append(matches, part)
+		}
+	}
+	return matches
+}
+
 func awaitAnthropicCall(t *testing.T, calls <-chan anthropicCall) anthropicCall {
 	t.Helper()
 
@@ -617,6 +726,17 @@ func awaitAnthropicCall(t *testing.T, calls <-chan anthropicCall) anthropicCall 
 		t.Fatal("timed out waiting for Anthropic request")
 		return anthropicCall{}
 	}
+}
+
+func requireWebSearchResultMetadata(t *testing.T, metadata fantasy.ProviderMetadata) *WebSearchResultMetadata {
+	t.Helper()
+
+	providerOption, ok := fantasy.ProviderOptions(metadata)[Name]
+	require.True(t, ok, "provider metadata should contain anthropic key")
+	result, ok := providerOption.(*WebSearchResultMetadata)
+	require.True(t, ok, "provider metadata should be *WebSearchResultMetadata")
+	require.NotNil(t, result)
+	return result
 }
 
 func assertNoAnthropicCall(t *testing.T, calls <-chan anthropicCall) {
@@ -733,6 +853,103 @@ func mockAnthropicWebSearchResponse() map[string]any {
 			},
 		},
 	}
+}
+
+func mockAnthropicWebSearchErrorResponse() map[string]any {
+	return map[string]any{
+		"id":    "msg_01WebSearchError",
+		"type":  "message",
+		"role":  "assistant",
+		"model": "claude-sonnet-4-20250514",
+		"content": []any{
+			map[string]any{
+				"type":   "server_tool_use",
+				"id":     "srvtoolu_err",
+				"name":   "web_search",
+				"input":  map[string]any{"query": "latest AI news"},
+				"caller": map[string]any{"type": "direct"},
+			},
+			map[string]any{
+				"type":        "web_search_tool_result",
+				"tool_use_id": "srvtoolu_err",
+				"caller":      map[string]any{"type": "direct"},
+				"content": map[string]any{
+					"type":       "web_search_tool_result_error",
+					"error_code": "max_uses_exceeded",
+				},
+			},
+			map[string]any{
+				"type": "text",
+				"text": "I was unable to search.",
+			},
+		},
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":                100,
+			"output_tokens":               20,
+			"cache_creation_input_tokens": 0,
+			"cache_read_input_tokens":     0,
+			"server_tool_use": map[string]any{
+				"web_search_requests": 1,
+			},
+		},
+	}
+}
+
+func TestToPrompt_WebSearchProviderExecutedErrorRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	prompt := fantasy.Prompt{
+		{
+			Role: fantasy.MessageRoleUser,
+			Content: []fantasy.MessagePart{
+				fantasy.TextPart{Text: "Search for the latest AI news"},
+			},
+		},
+		{
+			Role: fantasy.MessageRoleAssistant,
+			Content: []fantasy.MessagePart{
+				fantasy.ToolCallPart{
+					ToolCallID:       "srvtoolu_err",
+					ToolName:         "web_search",
+					Input:            `{"query":"latest AI news"}`,
+					ProviderExecuted: true,
+				},
+				fantasy.ToolResultPart{
+					ToolCallID:       "srvtoolu_err",
+					ProviderExecuted: true,
+					ProviderOptions: fantasy.ProviderOptions{
+						Name: &WebSearchResultMetadata{ErrorCode: "max_uses_exceeded"},
+					},
+				},
+				fantasy.TextPart{Text: "I was unable to search."},
+			},
+		},
+	}
+
+	_, messages, warnings := toPrompt(prompt, true)
+	require.Empty(t, warnings)
+	require.Len(t, messages, 2)
+
+	assistantMsg := messages[1]
+	require.Len(t, assistantMsg.Content, 3)
+	require.NotNil(t, assistantMsg.Content[0].OfServerToolUse)
+	require.Equal(t, "srvtoolu_err", assistantMsg.Content[0].OfServerToolUse.ID)
+
+	webResult := assistantMsg.Content[1]
+	require.NotNil(t, webResult.OfWebSearchToolResult)
+	require.Equal(t, "srvtoolu_err", webResult.OfWebSearchToolResult.ToolUseID)
+	require.Nil(t, webResult.OfWebSearchToolResult.Content.OfWebSearchToolResultBlockItem)
+	require.NotNil(t, webResult.OfWebSearchToolResult.Content.OfRequestWebSearchToolResultError)
+	require.Equal(
+		t,
+		anthropic.WebSearchToolResultErrorCodeMaxUsesExceeded,
+		webResult.OfWebSearchToolResult.Content.OfRequestWebSearchToolResultError.ErrorCode,
+	)
+
+	require.NotNil(t, assistantMsg.Content[2].OfText)
+	require.Equal(t, "I was unable to search.", assistantMsg.Content[2].OfText.Text)
 }
 
 func TestToPrompt_WebSearchProviderExecutedToolResults(t *testing.T) {
@@ -912,6 +1129,66 @@ func TestGenerate_WebSearchResponse(t *testing.T) {
 		"Based on recent search results, here is the latest AI news.",
 		texts[0].Text,
 	)
+}
+
+func TestGenerate_WebSearchErrorPreservesErrorCode(t *testing.T) {
+	t.Parallel()
+
+	server, calls := newAnthropicJSONServer(mockAnthropicWebSearchErrorResponse())
+	defer server.Close()
+
+	provider, err := New(
+		WithAPIKey("test-api-key"),
+		WithBaseURL(server.URL),
+	)
+	require.NoError(t, err)
+
+	model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	resp, err := model.Generate(context.Background(), fantasy.Call{
+		Prompt: testPrompt(),
+		Tools: []fantasy.Tool{
+			WebSearchTool(nil),
+		},
+	})
+	require.NoError(t, err)
+
+	call := awaitAnthropicCall(t, calls)
+	require.Equal(t, "POST", call.method)
+	require.Equal(t, "/v1/messages", call.path)
+
+	var (
+		toolCalls   []fantasy.ToolCallContent
+		sources     []fantasy.SourceContent
+		toolResults []fantasy.ToolResultContent
+		texts       []fantasy.TextContent
+	)
+	for _, c := range resp.Content {
+		switch v := c.(type) {
+		case fantasy.ToolCallContent:
+			toolCalls = append(toolCalls, v)
+		case fantasy.SourceContent:
+			sources = append(sources, v)
+		case fantasy.ToolResultContent:
+			toolResults = append(toolResults, v)
+		case fantasy.TextContent:
+			texts = append(texts, v)
+		}
+	}
+
+	require.Len(t, toolCalls, 1)
+	require.True(t, toolCalls[0].ProviderExecuted)
+	require.Equal(t, "srvtoolu_err", toolCalls[0].ToolCallID)
+	require.Empty(t, sources)
+	require.Len(t, toolResults, 1)
+	require.True(t, toolResults[0].ProviderExecuted)
+	require.Equal(t, "srvtoolu_err", toolResults[0].ToolCallID)
+	webMeta := requireWebSearchResultMetadata(t, toolResults[0].ProviderMetadata)
+	require.Equal(t, "max_uses_exceeded", webMeta.ErrorCode)
+	require.Empty(t, webMeta.Results)
+	require.Len(t, texts, 1)
+	require.Equal(t, "I was unable to search.", texts[0].Text)
 }
 
 func TestGenerate_WebSearchToolInRequest(t *testing.T) {
@@ -1383,6 +1660,75 @@ func TestStream_WebSearchResponse(t *testing.T) {
 	// Text block emits a text delta.
 	require.NotEmpty(t, textDeltas, "should have text deltas")
 	require.Equal(t, "Here are the results.", textDeltas[0].Delta)
+}
+
+func TestStream_WebSearchErrorPreservesErrorCode(t *testing.T) {
+	t.Parallel()
+
+	chunks := []string{
+		"event: message_start\n",
+		`data: {"type":"message_start","message":{"id":"msg_01WebSearchError","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":100,"output_tokens":0}}}` + "\n\n",
+		"event: content_block_start\n",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_err","name":"web_search","input":{}}}` + "\n\n",
+		"event: content_block_stop\n",
+		`data: {"type":"content_block_stop","index":0}` + "\n\n",
+		"event: content_block_start\n",
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_err","content":{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}}}` + "\n\n",
+		"event: content_block_stop\n",
+		`data: {"type":"content_block_stop","index":1}` + "\n\n",
+		"event: message_stop\n",
+		`data: {"type":"message_stop"}` + "\n\n",
+	}
+
+	server, calls := newAnthropicStreamingServer(chunks)
+	defer server.Close()
+
+	provider, err := New(
+		WithAPIKey("test-api-key"),
+		WithBaseURL(server.URL),
+	)
+	require.NoError(t, err)
+
+	model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	stream, err := model.Stream(context.Background(), fantasy.Call{
+		Prompt: testPrompt(),
+		Tools: []fantasy.Tool{
+			WebSearchTool(nil),
+		},
+	})
+	require.NoError(t, err)
+
+	var parts []fantasy.StreamPart
+	stream(func(part fantasy.StreamPart) bool {
+		parts = append(parts, part)
+		return true
+	})
+
+	_ = awaitAnthropicCall(t, calls)
+
+	var (
+		toolResults []fantasy.StreamPart
+		sourceParts []fantasy.StreamPart
+	)
+	for _, p := range parts {
+		switch p.Type {
+		case fantasy.StreamPartTypeToolResult:
+			toolResults = append(toolResults, p)
+		case fantasy.StreamPartTypeSource:
+			sourceParts = append(sourceParts, p)
+		}
+	}
+
+	require.Len(t, toolResults, 1)
+	require.Empty(t, sourceParts)
+	require.True(t, toolResults[0].ProviderExecuted)
+	require.Equal(t, "srvtoolu_err", toolResults[0].ID)
+	require.Equal(t, "web_search", toolResults[0].ToolCallName)
+	webMeta := requireWebSearchResultMetadata(t, toolResults[0].ProviderMetadata)
+	require.Equal(t, "max_uses_exceeded", webMeta.ErrorCode)
+	require.Empty(t, webMeta.Results)
 }
 
 func TestGenerate_ToolChoiceNone(t *testing.T) {
@@ -1883,6 +2229,126 @@ func TestGenerate_BetaAPI(t *testing.T) {
 	})
 }
 
+func TestStream_RedactedThinkingEmitsStartAndEnd(t *testing.T) {
+	t.Parallel()
+
+	parts := streamAnthropicParts(t, []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_redacted","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"redacted_blob"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	})
+
+	starts := streamPartsByType(parts, fantasy.StreamPartTypeReasoningStart)
+	ends := streamPartsByType(parts, fantasy.StreamPartTypeReasoningEnd)
+	require.Len(t, starts, 1)
+	require.Len(t, ends, 1)
+	require.Equal(t, starts[0].ID, ends[0].ID)
+	require.Equal(t, "redacted_blob", requireReasoningMetadata(t, starts[0].ProviderMetadata).RedactedData)
+	require.Equal(t, "redacted_blob", requireReasoningMetadata(t, ends[0].ProviderMetadata).RedactedData)
+}
+
+func TestStream_ThinkingSignaturePresentOnEnd(t *testing.T) {
+	t.Parallel()
+
+	parts := streamAnthropicParts(t, []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_sig","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first thought"}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_123"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	})
+
+	deltas := streamPartsByType(parts, fantasy.StreamPartTypeReasoningDelta)
+	ends := streamPartsByType(parts, fantasy.StreamPartTypeReasoningEnd)
+	require.Len(t, deltas, 2)
+	require.Equal(t, "first thought", deltas[0].Delta)
+	require.Equal(t, "sig_123", requireReasoningMetadata(t, deltas[1].ProviderMetadata).Signature)
+	require.Len(t, ends, 1)
+	require.Equal(t, "sig_123", requireReasoningMetadata(t, ends[0].ProviderMetadata).Signature)
+}
+
+func TestStream_NilMetadataDeltaDoesNotEraseSignatureOnEnd(t *testing.T) {
+	t.Parallel()
+
+	parts := streamAnthropicParts(t, []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_sig_tail","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first"}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_tail"}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"second"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	})
+
+	deltas := streamPartsByType(parts, fantasy.StreamPartTypeReasoningDelta)
+	ends := streamPartsByType(parts, fantasy.StreamPartTypeReasoningEnd)
+	require.Len(t, deltas, 3)
+	require.Equal(t, "first", deltas[0].Delta)
+	require.Len(t, deltas[0].ProviderMetadata, 0)
+	require.Equal(t, "sig_tail", requireReasoningMetadata(t, deltas[1].ProviderMetadata).Signature)
+	require.Equal(t, "second", deltas[2].Delta)
+	require.Len(t, deltas[2].ProviderMetadata, 0)
+	require.Len(t, ends, 1)
+	require.Equal(t, "sig_tail", requireReasoningMetadata(t, ends[0].ProviderMetadata).Signature)
+}
+
+func TestStream_InterleavedThinkingAndRedactedThinking(t *testing.T) {
+	t.Parallel()
+
+	parts := streamAnthropicParts(t, []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_interleaved","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"redacted_0"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"reasoning_1"}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig_1"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":1}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":2,"content_block":{"type":"redacted_thinking","data":"redacted_2"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":2}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	})
+
+	var reasoningParts []fantasy.StreamPart
+	for _, part := range parts {
+		switch part.Type {
+		case fantasy.StreamPartTypeReasoningStart, fantasy.StreamPartTypeReasoningDelta, fantasy.StreamPartTypeReasoningEnd:
+			reasoningParts = append(reasoningParts, part)
+		}
+	}
+
+	require.Len(t, reasoningParts, 8)
+	require.Equal(t, fantasy.StreamPartTypeReasoningStart, reasoningParts[0].Type)
+	require.Equal(t, "0", reasoningParts[0].ID)
+	require.Equal(t, "redacted_0", requireReasoningMetadata(t, reasoningParts[0].ProviderMetadata).RedactedData)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningEnd, reasoningParts[1].Type)
+	require.Equal(t, "0", reasoningParts[1].ID)
+	require.Equal(t, "redacted_0", requireReasoningMetadata(t, reasoningParts[1].ProviderMetadata).RedactedData)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningStart, reasoningParts[2].Type)
+	require.Equal(t, "1", reasoningParts[2].ID)
+	require.Len(t, reasoningParts[2].ProviderMetadata, 0)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningDelta, reasoningParts[3].Type)
+	require.Equal(t, "reasoning_1", reasoningParts[3].Delta)
+	require.Equal(t, fantasy.StreamPartTypeReasoningDelta, reasoningParts[4].Type)
+	require.Equal(t, "sig_1", requireReasoningMetadata(t, reasoningParts[4].ProviderMetadata).Signature)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningEnd, reasoningParts[5].Type)
+	require.Equal(t, "1", reasoningParts[5].ID)
+	require.Equal(t, "sig_1", requireReasoningMetadata(t, reasoningParts[5].ProviderMetadata).Signature)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningStart, reasoningParts[6].Type)
+	require.Equal(t, "2", reasoningParts[6].ID)
+	require.Equal(t, "redacted_2", requireReasoningMetadata(t, reasoningParts[6].ProviderMetadata).RedactedData)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningEnd, reasoningParts[7].Type)
+	require.Equal(t, "2", reasoningParts[7].ID)
+	require.Equal(t, "redacted_2", requireReasoningMetadata(t, reasoningParts[7].ProviderMetadata).RedactedData)
+}
+
 func TestStream_BetaAPI(t *testing.T) {
 	t.Parallel()
 
@@ -2332,4 +2798,49 @@ func TestStream_ComputerUseTool(t *testing.T) {
 	for i, h := range betaHeaders {
 		require.Contains(t, h, "computer-use-2025-01-24", "request %d", i)
 	}
+}
+
+func TestStream_TruncatedWithoutStopReason(t *testing.T) {
+	t.Parallel()
+
+	// Truncated stream: no terminal message_delta with stop_reason.
+	server, _ := newAnthropicStreamingServer([]string{
+		"event: message_start\n",
+		`data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}` + "\n\n",
+		"event: content_block_start\n",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n",
+		"event: content_block_delta\n",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}` + "\n\n",
+		"event: content_block_stop\n",
+		`data: {"type":"content_block_stop","index":0}` + "\n\n",
+	})
+	defer server.Close()
+
+	provider, err := New(WithAPIKey("test-api-key"), WithBaseURL(server.URL))
+	require.NoError(t, err)
+	model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	stream, err := model.Stream(context.Background(), fantasy.Call{Prompt: testPrompt()})
+	require.NoError(t, err)
+
+	var parts []fantasy.StreamPart
+	stream(func(part fantasy.StreamPart) bool {
+		parts = append(parts, part)
+		return true
+	})
+
+	var errPart *fantasy.StreamPart
+	for i, part := range parts {
+		if part.Type == fantasy.StreamPartTypeError {
+			errPart = &parts[i]
+		}
+		require.NotEqual(t, fantasy.StreamPartTypeFinish, part.Type)
+	}
+	require.NotNil(t, errPart)
+
+	var providerErr *fantasy.ProviderError
+	require.ErrorAs(t, errPart.Error, &providerErr)
+	require.True(t, providerErr.IsRetryable())
+	require.ErrorIs(t, providerErr.Cause, io.ErrUnexpectedEOF)
 }

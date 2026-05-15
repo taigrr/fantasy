@@ -16,9 +16,9 @@ import (
 const reasoningStartedCtx = "reasoning_started"
 
 // PrepareCallFunc prepares the call for the language model.
-func PrepareCallFunc(_ fantasy.LanguageModel, params *openaisdk.ChatCompletionNewParams, call fantasy.Call) ([]fantasy.CallWarning, error) {
+func PrepareCallFunc(model fantasy.LanguageModel, params *openaisdk.ChatCompletionNewParams, call fantasy.Call) ([]fantasy.CallWarning, error) {
 	providerOptions := &ProviderOptions{}
-	if v, ok := call.ProviderOptions[Name]; ok {
+	if v, ok := call.ProviderOptions[model.Provider()]; ok {
 		providerOptions, ok = v.(*ProviderOptions)
 		if !ok {
 			return nil, &fantasy.Error{Title: "invalid argument", Message: "openai-compat provider options should be *openaicompat.ProviderOptions"}
@@ -46,6 +46,9 @@ func PrepareCallFunc(_ fantasy.LanguageModel, params *openaisdk.ChatCompletionNe
 
 	if providerOptions.User != nil {
 		params.User = param.NewOpt(*providerOptions.User)
+	}
+	if len(providerOptions.ExtraBody) > 0 {
+		params.SetExtraFields(providerOptions.ExtraBody)
 	}
 	return nil, nil
 }

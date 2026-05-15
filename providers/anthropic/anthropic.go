@@ -402,6 +402,21 @@ func GetReasoningMetadata(providerOptions fantasy.ProviderOptions) *ReasoningOpt
 	return nil
 }
 
+func reasoningProviderMetadata(signature, redactedData string) fantasy.ProviderMetadata {
+	switch {
+	case signature != "":
+		return fantasy.ProviderMetadata{
+			Name: &ReasoningOptionMetadata{Signature: signature},
+		}
+	case redactedData != "":
+		return fantasy.ProviderMetadata{
+			Name: &ReasoningOptionMetadata{RedactedData: redactedData},
+		}
+	default:
+		return nil
+	}
+}
+
 type messageBlock struct {
 	Role     fantasy.MessageRole
 	Messages []fantasy.Message
@@ -1001,10 +1016,9 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 						if toolCall.ProviderExecuted {
 							// Reconstruct server_tool_use block for
 							// multi-turn round-tripping.
-							var inputAny any
-							err := json.Unmarshal([]byte(toolCall.Input), &inputAny)
-							if err != nil {
-								continue
+							inputAny, warning := decodeToolCallInputAny(toolCall)
+							if warning != nil {
+								warnings = append(warnings, *warning)
 							}
 							anthropicContent = append(anthropicContent, anthropic.ContentBlockParamUnion{
 								OfServerToolUse: &anthropic.ServerToolUseBlockParam{
@@ -1015,10 +1029,9 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 							})
 							continue
 						}
-						var inputMap map[string]any
-						err := json.Unmarshal([]byte(toolCall.Input), &inputMap)
-						if err != nil {
-							continue
+						inputMap, warning := decodeToolCallInputMap(toolCall)
+						if warning != nil {
+							warnings = append(warnings, *warning)
 						}
 						toolUseBlock := anthropic.NewToolUseBlock(toolCall.ToolCallID, inputMap, toolCall.ToolName)
 						if cacheControl != nil {
@@ -1031,8 +1044,9 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 							continue
 						}
 						if result.ProviderExecuted {
-							// Reconstruct web_search_tool_result block
-							// with encrypted_content for round-tripping.
+							// Reconstruct web_search_tool_result blocks,
+							// including encrypted content and errors, for
+							// round-tripping.
 							searchMeta := &WebSearchResultMetadata{}
 							if webMeta, ok := result.ProviderOptions[Name]; ok {
 								if typed, ok := webMeta.(*WebSearchResultMetadata); ok {
@@ -1079,27 +1093,86 @@ func hasVisibleAssistantContent(content []anthropic.ContentBlockParamUnion) bool
 	return false
 }
 
+// decodeToolCallInputMap unmarshals a ToolCallPart.Input into a map for
+// reconstructing an Anthropic tool_use block. The Anthropic API rejects any
+// request whose tool_result lacks a matching tool_use in the previous
+// message, so this helper never drops the block: empty input becomes {},
+// and malformed input falls back to {} with a CallWarning. The caller still
+// emits a tool_use block with the original ToolCallID, preserving the pair.
+func decodeToolCallInputMap(toolCall fantasy.ToolCallPart) (map[string]any, *fantasy.CallWarning) {
+	if strings.TrimSpace(toolCall.Input) == "" {
+		return map[string]any{}, nil
+	}
+	var inputMap map[string]any
+	if err := json.Unmarshal([]byte(toolCall.Input), &inputMap); err != nil {
+		return map[string]any{}, &fantasy.CallWarning{
+			Type: fantasy.CallWarningTypeOther,
+			Message: fmt.Sprintf(
+				"tool call %q has malformed input JSON; emitting empty arguments to preserve tool_use ↔ tool_result pairing: %s",
+				toolCall.ToolCallID, err,
+			),
+		}
+	}
+	if inputMap == nil {
+		return map[string]any{}, nil
+	}
+	return inputMap, nil
+}
+
+// decodeToolCallInputAny is the server_tool_use counterpart to
+// decodeToolCallInputMap. ServerToolUseBlockParam.Input has type `any` so
+// nil is acceptable for the empty case.
+func decodeToolCallInputAny(toolCall fantasy.ToolCallPart) (any, *fantasy.CallWarning) {
+	if strings.TrimSpace(toolCall.Input) == "" {
+		return nil, nil
+	}
+	var inputAny any
+	if err := json.Unmarshal([]byte(toolCall.Input), &inputAny); err != nil {
+		return nil, &fantasy.CallWarning{
+			Type: fantasy.CallWarningTypeOther,
+			Message: fmt.Sprintf(
+				"server tool call %q has malformed input JSON; emitting empty arguments to preserve tool_use ↔ tool_result pairing: %s",
+				toolCall.ToolCallID, err,
+			),
+		}
+	}
+	return inputAny, nil
+}
+
 // buildWebSearchToolResultBlock constructs an Anthropic
 // web_search_tool_result content block from structured metadata.
 func buildWebSearchToolResultBlock(toolCallID string, searchMeta *WebSearchResultMetadata) anthropic.ContentBlockParamUnion {
-	resultBlocks := make([]anthropic.WebSearchResultBlockParam, 0, len(searchMeta.Results))
-	for _, r := range searchMeta.Results {
-		block := anthropic.WebSearchResultBlockParam{
-			URL:              r.URL,
-			Title:            r.Title,
-			EncryptedContent: r.EncryptedContent,
+	var content anthropic.WebSearchToolResultBlockParamContentUnion
+	switch {
+	case searchMeta != nil && len(searchMeta.Results) > 0:
+		resultBlocks := make([]anthropic.WebSearchResultBlockParam, 0, len(searchMeta.Results))
+		for _, r := range searchMeta.Results {
+			block := anthropic.WebSearchResultBlockParam{
+				URL:              r.URL,
+				Title:            r.Title,
+				EncryptedContent: r.EncryptedContent,
+			}
+			if r.PageAge != "" {
+				block.PageAge = param.NewOpt(r.PageAge)
+			}
+			resultBlocks = append(resultBlocks, block)
 		}
-		if r.PageAge != "" {
-			block.PageAge = param.NewOpt(r.PageAge)
+		content = anthropic.WebSearchToolResultBlockParamContentUnion{
+			OfWebSearchToolResultBlockItem: resultBlocks,
 		}
-		resultBlocks = append(resultBlocks, block)
+	case searchMeta != nil && searchMeta.ErrorCode != "":
+		content = anthropic.NewWebSearchToolRequestError(
+			anthropic.WebSearchToolResultErrorCode(searchMeta.ErrorCode),
+		)
+	default:
+		content = anthropic.WebSearchToolResultBlockParamContentUnion{
+			OfWebSearchToolResultBlockItem: []anthropic.WebSearchResultBlockParam{},
+		}
 	}
 	return anthropic.ContentBlockParamUnion{
 		OfWebSearchToolResult: &anthropic.WebSearchToolResultBlockParam{
 			ToolUseID: toolCallID,
-			Content: anthropic.WebSearchToolResultBlockParamContentUnion{
-				OfWebSearchToolResultBlockItem: resultBlocks,
-			},
+			Content:   content,
 		},
 	}
 }
@@ -1128,6 +1201,9 @@ func (a languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantas
 	response, err := a.client.Messages.New(ctx, *params, reqOpts...)
 	if err != nil {
 		return nil, toProviderErr(err)
+	}
+	if response == nil {
+		return nil, &fantasy.Error{Title: "no response", Message: "provider returned nil response"}
 	}
 
 	var content []fantasy.Content
@@ -1226,6 +1302,12 @@ func (a languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantas
 						Results: metadataResults,
 					},
 				}
+			} else if webSearchResult.Content.ErrorCode != "" {
+				toolResult.ProviderMetadata = fantasy.ProviderMetadata{
+					Name: &WebSearchResultMetadata{
+						ErrorCode: string(webSearchResult.Content.ErrorCode),
+					},
+				}
 			}
 			content = append(content, toolResult)
 		}
@@ -1290,13 +1372,9 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 					}
 				case "redacted_thinking":
 					if !yield(fantasy.StreamPart{
-						Type: fantasy.StreamPartTypeReasoningStart,
-						ID:   fmt.Sprintf("%d", chunk.Index),
-						ProviderMetadata: fantasy.ProviderMetadata{
-							Name: &ReasoningOptionMetadata{
-								RedactedData: chunk.ContentBlock.Data,
-							},
-						},
+						Type:             fantasy.StreamPartTypeReasoningStart,
+						ID:               fmt.Sprintf("%d", chunk.Index),
+						ProviderMetadata: reasoningProviderMetadata("", chunk.ContentBlock.Data),
 					}) {
 						return
 					}
@@ -1335,8 +1413,17 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 					}
 				case "thinking":
 					if !yield(fantasy.StreamPart{
-						Type: fantasy.StreamPartTypeReasoningEnd,
-						ID:   fmt.Sprintf("%d", chunk.Index),
+						Type:             fantasy.StreamPartTypeReasoningEnd,
+						ID:               fmt.Sprintf("%d", chunk.Index),
+						ProviderMetadata: reasoningProviderMetadata(contentBlock.Signature, ""),
+					}) {
+						return
+					}
+				case "redacted_thinking":
+					if !yield(fantasy.StreamPart{
+						Type:             fantasy.StreamPartTypeReasoningEnd,
+						ID:               fmt.Sprintf("%d", chunk.Index),
+						ProviderMetadata: reasoningProviderMetadata("", contentBlock.Data),
 					}) {
 						return
 					}
@@ -1406,6 +1493,12 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 								Results: metadataResults,
 							},
 						}
+					} else if contentBlock.Content.ErrorCode != "" {
+						providerMeta = fantasy.ProviderMetadata{
+							Name: &WebSearchResultMetadata{
+								ErrorCode: string(contentBlock.Content.ErrorCode),
+							},
+						}
 					}
 					if !yield(fantasy.StreamPart{
 						Type:             fantasy.StreamPartTypeToolResult,
@@ -1466,6 +1559,15 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 
 		err := stream.Err()
 		if err == nil || errors.Is(err, io.EOF) {
+			// Truncated stream: no terminal message_delta with stop_reason.
+			// Surface as a retryable error.
+			if acc.StopReason == "" {
+				yield(fantasy.StreamPart{
+					Type:  fantasy.StreamPartTypeError,
+					Error: fantasy.NewIncompleteStreamError(),
+				})
+				return
+			}
 			yield(fantasy.StreamPart{
 				Type:         fantasy.StreamPartTypeFinish,
 				ID:           acc.ID,
