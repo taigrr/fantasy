@@ -9,17 +9,23 @@ import (
 	"github.com/aws/smithy-go/auth/bearer"
 )
 
-func bedrockBasicAuthConfig(apiKey string) aws.Config {
+// resolveBedrockRegion picks an explicit region, falls back to
+// AWS_REGION, then defaults to us-east-1.
+func resolveBedrockRegion(region string) string {
+	return cmp.Or(region, os.Getenv("AWS_REGION"), "us-east-1")
+}
+
+func bedrockBasicAuthConfig(apiKey, region string) aws.Config {
 	return aws.Config{
-		Region:                  cmp.Or(os.Getenv("AWS_REGION"), "us-east-1"),
+		Region:                  resolveBedrockRegion(region),
 		BearerAuthTokenProvider: bearer.StaticTokenProvider{Token: bearer.Token{Value: apiKey}},
 	}
 }
 
-func bedrockPrefixModelWithRegion(modelID string) string {
-	region := os.Getenv("AWS_REGION")
+func bedrockPrefixModelWithRegion(modelID, region string) string {
+	region = resolveBedrockRegion(region)
 	if len(region) < 2 {
-		region = "us-east-1"
+		return modelID
 	}
 	prefix := region[:2] + "."
 	if strings.HasPrefix(modelID, prefix) {
