@@ -162,8 +162,10 @@ func WithObjectMode(om fantasy.ObjectMode) Option {
 	}
 }
 
-// LanguageModel implements fantasy.Provider.
-func (o *provider) LanguageModel(_ context.Context, modelID string) (fantasy.LanguageModel, error) {
+// newClient builds an OpenAI SDK client from the resolved provider
+// options. It is shared by LanguageModel and EmbeddingModel so both
+// honor the same auth, headers, and HTTP client configuration.
+func (o *provider) newClient() openai.Client {
 	openaiClientOptions := make([]option.RequestOption, 0, 5+len(o.options.headers)+len(o.options.sdkOptions))
 	openaiClientOptions = append(openaiClientOptions, option.WithMaxRetries(0))
 
@@ -186,7 +188,12 @@ func (o *provider) LanguageModel(_ context.Context, modelID string) (fantasy.Lan
 
 	openaiClientOptions = append(openaiClientOptions, o.options.sdkOptions...)
 
-	client := openai.NewClient(openaiClientOptions...)
+	return openai.NewClient(openaiClientOptions...)
+}
+
+// LanguageModel implements fantasy.Provider.
+func (o *provider) LanguageModel(_ context.Context, modelID string) (fantasy.LanguageModel, error) {
+	client := o.newClient()
 
 	if o.options.useResponsesAPI && o.isResponsesModel(modelID) {
 		// Not supported for responses API
