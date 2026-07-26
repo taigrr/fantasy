@@ -21,6 +21,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/kaptinlin/jsonschema v0.9.3
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/net v0.54.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/genai v1.56.0
 )
@@ -111,7 +112,6 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.3 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
-	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
