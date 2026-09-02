@@ -2,6 +2,21 @@
 
 This document describes how to get an API keys for Google Gemini and Vertex.
 
+## Build tag
+
+The Gemini/Vertex client (`google.golang.org/genai` plus its gRPC and cloud
+auth dependency tree, roughly 14 MB of binary) is compiled in only when the
+`fantasy_google` build tag is set:
+
+```sh
+go build -tags fantasy_google ./...
+```
+
+Without the tag, `google.New` and the option constructors still compile and
+`google.Enabled` is `false`; `LanguageModel` returns `google.ErrNotCompiled`.
+The same tag gates Vertex AI support in the Anthropic provider
+(`anthropic.VertexEnabled`, `anthropic.ErrVertexNotCompiled`).
+
 ## Gemini
 
 Simply navigate to [this page](https://aistudio.google.com/apikey) in the

@@ -24,7 +24,8 @@ tasks:
   test:
     desc: Run tests for all packages
     cmds:
-      - go test ./... -count=1 -timeout=30m {{.CLI_ARGS}}
+      - go test -tags fantasy_google ./... -count=1 -timeout=30m {{.CLI_ARGS}}
+      - go test ./providers/google/... ./providers/anthropic/... -count=1 {{.CLI_ARGS}}
   release:
     desc: Create and push a new tag following semver
     vars:

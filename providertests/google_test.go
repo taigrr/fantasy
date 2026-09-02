@@ -1,3 +1,5 @@
+//go:build fantasy_google
+
 package providertests
 
 import (

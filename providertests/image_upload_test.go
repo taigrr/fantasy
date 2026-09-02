@@ -63,10 +63,12 @@ func TestImageUploadAgent(t *testing.T) {
 			name:    "openai-gpt-5",
 			builder: openAIImageBuilder("gpt-5"),
 		},
-		{
+	}
+	if google.Enabled {
+		pairs = append(pairs, builderPair{
 			name:    "gemini-2.5-pro",
 			builder: geminiImageBuilder("gemini-2.5-pro"),
-		},
+		})
 	}
 
 	img, err := os.ReadFile("testdata/wish.png")
@@ -109,10 +111,12 @@ func TestImageUploadAgentStreaming(t *testing.T) {
 			name:    "openai-gpt-5",
 			builder: openAIImageBuilder("gpt-5"),
 		},
-		{
+	}
+	if google.Enabled {
+		pairs = append(pairs, builderPair{
 			name:    "gemini-2.5-pro",
 			builder: geminiImageBuilder("gemini-2.5-pro"),
-		},
+		})
 	}
 
 	img, err := os.ReadFile("testdata/wish.png")

@@ -1,3 +1,5 @@
+//go:build fantasy_google
+
 package google
 
 import (
@@ -6,151 +8,32 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"reflect"
 	"strings"
 
+	"cloud.google.com/go/auth"
+	"github.com/charmbracelet/x/exp/slice"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/object"
 	"github.com/taigrr/fantasy/providers/anthropic"
 	"github.com/taigrr/fantasy/providers/internal/httpheaders"
 	"github.com/taigrr/fantasy/schema"
-	"cloud.google.com/go/auth"
-	"github.com/charmbracelet/x/exp/slice"
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 )
 
-// Name is the name of the Google provider.
-const Name = "google"
+// Enabled reports whether the Gemini/Vertex client was compiled in.
+const Enabled = true
 
-type provider struct {
-	options options
-}
-
-// ToolCallIDFunc defines a function that generates a tool call ID.
-type ToolCallIDFunc = func() string
-
-type options struct {
-	apiKey         string
-	name           string
-	baseURL        string
-	headers        map[string]string
-	userAgent      string
-	client         *http.Client
-	backend        genai.Backend
-	project        string
-	location       string
-	skipAuth       bool
-	toolCallIDFunc ToolCallIDFunc
-	objectMode     fantasy.ObjectMode
-}
-
-// Option defines a function that configures Google provider options.
-type Option = func(*options)
-
-// New creates a new Google provider with the given options.
-func New(opts ...Option) (fantasy.Provider, error) {
-	options := options{
-		headers: map[string]string{},
-		toolCallIDFunc: func() string {
-			return uuid.NewString()
-		},
+func (b backend) genai() genai.Backend {
+	switch b {
+	case backendGeminiAPI:
+		return genai.BackendGeminiAPI
+	case backendVertexAI:
+		return genai.BackendVertexAI
+	default:
+		return genai.BackendUnspecified
 	}
-	for _, o := range opts {
-		o(&options)
-	}
-
-	options.name = cmp.Or(options.name, Name)
-
-	return &provider{
-		options: options,
-	}, nil
-}
-
-// WithBaseURL sets the base URL for the Google provider.
-func WithBaseURL(baseURL string) Option {
-	return func(o *options) {
-		o.baseURL = baseURL
-	}
-}
-
-// WithGeminiAPIKey sets the Gemini API key for the Google provider.
-func WithGeminiAPIKey(apiKey string) Option {
-	return func(o *options) {
-		o.backend = genai.BackendGeminiAPI
-		o.apiKey = apiKey
-		o.project = ""
-		o.location = ""
-	}
-}
-
-// WithVertex configures the Google provider to use Vertex AI.
-func WithVertex(project, location string) Option {
-	if project == "" || location == "" {
-		panic("project and location must be provided")
-	}
-	return func(o *options) {
-		o.backend = genai.BackendVertexAI
-		o.apiKey = ""
-		o.project = project
-		o.location = location
-	}
-}
-
-// WithSkipAuth configures whether to skip authentication for the Google provider.
-func WithSkipAuth(skipAuth bool) Option {
-	return func(o *options) {
-		o.skipAuth = skipAuth
-	}
-}
-
-// WithName sets the name for the Google provider.
-func WithName(name string) Option {
-	return func(o *options) {
-		o.name = name
-	}
-}
-
-// WithHeaders sets the headers for the Google provider.
-func WithHeaders(headers map[string]string) Option {
-	return func(o *options) {
-		maps.Copy(o.headers, headers)
-	}
-}
-
-// WithHTTPClient sets the HTTP client for the Google provider.
-func WithHTTPClient(client *http.Client) Option {
-	return func(o *options) {
-		o.client = client
-	}
-}
-
-// WithToolCallIDFunc sets the function that generates a tool call ID.
-func WithToolCallIDFunc(f ToolCallIDFunc) Option {
-	return func(o *options) {
-		o.toolCallIDFunc = f
-	}
-}
-
-// WithUserAgent sets an explicit User-Agent header, overriding the default and any
-// value set via WithHeaders.
-func WithUserAgent(ua string) Option {
-	return func(o *options) {
-		o.userAgent = ua
-	}
-}
-
-// WithObjectMode sets the object generation mode for the Google provider.
-func WithObjectMode(om fantasy.ObjectMode) Option {
-	return func(o *options) {
-		o.objectMode = om
-	}
-}
-
-func (*provider) Name() string {
-	return Name
 }
 
 type languageModel struct {
@@ -181,7 +64,7 @@ func (a *provider) LanguageModel(ctx context.Context, modelID string) (fantasy.L
 
 	cc := &genai.ClientConfig{
 		HTTPClient: wrapHTTPClient(a.options.client),
-		Backend:    a.options.backend,
+		Backend:    a.options.backend.genai(),
 		APIKey:     a.options.apiKey,
 		Project:    a.options.project,
 		Location:   a.options.location,
@@ -1420,16 +1303,6 @@ func (g languageModel) mapResponse(response *genai.GenerateContentResponse, warn
 		FinishReason: finishReason,
 		Warnings:     warnings,
 	}, nil
-}
-
-// GetReasoningMetadata extracts reasoning metadata from provider options for google models.
-func GetReasoningMetadata(providerOptions fantasy.ProviderOptions) *ReasoningMetadata {
-	if googleOptions, ok := providerOptions[Name]; ok {
-		if reasoning, ok := googleOptions.(*ReasoningMetadata); ok {
-			return reasoning
-		}
-	}
-	return nil
 }
 
 func mapFinishReason(reason genai.FinishReason) fantasy.FinishReason {

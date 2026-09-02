@@ -1,6 +1,8 @@
 version: "2"
 run:
   tests: false
+  build-tags:
+    - fantasy_google
 linters:
   enable:
     - bodyclose

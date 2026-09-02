@@ -1,3 +1,5 @@
+//go:build fantasy_google
+
 package google
 
 func depointerSlice[T any](s []*T) []T {

@@ -21,9 +21,11 @@ import (
 	"github.com/charmbracelet/anthropic-sdk-go/bedrock"
 	"github.com/charmbracelet/anthropic-sdk-go/option"
 	"github.com/charmbracelet/anthropic-sdk-go/packages/param"
-	"github.com/charmbracelet/anthropic-sdk-go/vertex"
-	"golang.org/x/oauth2/google"
 )
+
+// ErrVertexNotCompiled is returned when a Vertex AI provider is requested
+// from a binary built without the fantasy_google build tag.
+var ErrVertexNotCompiled = errors.New("anthropic: Vertex AI support not compiled in; rebuild with -tags fantasy_google")
 
 // betaRequestOptions converts beta flag strings into request
 // options that enable the corresponding Anthropic beta APIs.
@@ -211,26 +213,11 @@ func (a *provider) LanguageModel(ctx context.Context, modelID string) (fantasy.L
 		clientOptions = append(clientOptions, option.WithHTTPClient(a.options.client))
 	}
 	if a.options.vertexProject != "" && a.options.vertexLocation != "" {
-		var credentials *google.Credentials
-		if a.options.skipAuth {
-			credentials = &google.Credentials{TokenSource: &googleDummyTokenSource{}}
-		} else {
-			var err error
-			credentials, err = google.FindDefaultCredentials(ctx, VertexAuthScope)
-			if err != nil {
-				return nil, err
-			}
+		vertexOpts, err := vertexRequestOptions(ctx, a.options)
+		if err != nil {
+			return nil, err
 		}
-
-		clientOptions = append(
-			clientOptions,
-			vertex.WithCredentials(
-				ctx,
-				a.options.vertexLocation,
-				a.options.vertexProject,
-				credentials,
-			),
-		)
+		clientOptions = append(clientOptions, vertexOpts...)
 	}
 	if a.options.useBedrock {
 		modelID = bedrockPrefixModelWithRegion(modelID, a.options.bedrockRegion)
