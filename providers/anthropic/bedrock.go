@@ -22,14 +22,34 @@ func bedrockBasicAuthConfig(apiKey, region string) aws.Config {
 	}
 }
 
+// bedrockInferenceProfilePrefixes are the cross-region inference
+// profile prefixes Bedrock model IDs may already carry. IDs starting
+// with one of these are fully qualified and must not be prefixed
+// again with the caller's region.
+var bedrockInferenceProfilePrefixes = []string{
+	"global.",
+	"us-gov.",
+	"us.",
+	"eu.",
+	"apac.",
+	"ap.",
+	"jp.",
+	"au.",
+	"ca.",
+	"sa.",
+	"il.",
+	"mx.",
+}
+
 func bedrockPrefixModelWithRegion(modelID, region string) string {
+	for _, prefix := range bedrockInferenceProfilePrefixes {
+		if strings.HasPrefix(modelID, prefix) {
+			return modelID
+		}
+	}
 	region = resolveBedrockRegion(region)
 	if len(region) < 2 {
 		return modelID
 	}
-	prefix := region[:2] + "."
-	if strings.HasPrefix(modelID, prefix) {
-		return modelID
-	}
-	return prefix + modelID
+	return region[:2] + "." + modelID
 }
