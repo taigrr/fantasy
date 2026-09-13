@@ -13,15 +13,15 @@ import (
 	"math"
 	"strings"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/object"
-	"github.com/taigrr/fantasy/providers/internal/httpheaders"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/charmbracelet/anthropic-sdk-go"
 	"github.com/charmbracelet/anthropic-sdk-go/bedrock"
 	"github.com/charmbracelet/anthropic-sdk-go/option"
 	"github.com/charmbracelet/anthropic-sdk-go/packages/param"
 	"github.com/charmbracelet/anthropic-sdk-go/vertex"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/object"
+	"github.com/taigrr/fantasy/providers/internal/httpheaders"
 	"golang.org/x/oauth2/google"
 )
 
@@ -1196,6 +1196,8 @@ func mapFinishReason(finishReason string) fantasy.FinishReason {
 		return fantasy.FinishReasonLength
 	case "tool_use":
 		return fantasy.FinishReasonToolCalls
+	case "refusal":
+		return fantasy.FinishReasonContentFilter
 	default:
 		return fantasy.FinishReasonUnknown
 	}
