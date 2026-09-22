@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
+	"charm.land/x/vcr"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/openai"
-	"charm.land/x/vcr"
 )
 
 var openaiTestModels = []testModel{

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/taigrr/fantasy"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
 )
 
 func TestPrepareParams_Store(t *testing.T) {

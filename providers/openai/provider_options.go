@@ -4,8 +4,8 @@ package openai
 import (
 	"encoding/json"
 
-	"github.com/taigrr/fantasy"
 	"github.com/charmbracelet/openai-go"
+	"github.com/taigrr/fantasy"
 )
 
 // ReasoningEffort represents the reasoning effort level for OpenAI models.

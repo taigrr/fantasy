@@ -855,35 +855,29 @@ func TestStopConditions(t *testing.T) {
 
 	// Create test steps
 	step1 := StepResult{
-		Response: Response{
-			Content: ResponseContent{
-				TextContent{Text: "Hello"},
-			},
-			FinishReason: FinishReasonToolCalls,
-			Usage:        Usage{TotalTokens: 10},
+		Content: ResponseContent{
+			TextContent{Text: "Hello"},
 		},
+		FinishReason: FinishReasonToolCalls,
+		Usage:        Usage{TotalTokens: 10},
 	}
 
 	step2 := StepResult{
-		Response: Response{
-			Content: ResponseContent{
-				TextContent{Text: "World"},
-				ToolCallContent{ToolCallID: "call1", ToolName: "search", Input: `{"query": "test"}`},
-			},
-			FinishReason: FinishReasonStop,
-			Usage:        Usage{TotalTokens: 15},
+		Content: ResponseContent{
+			TextContent{Text: "World"},
+			ToolCallContent{ToolCallID: "call1", ToolName: "search", Input: `{"query": "test"}`},
 		},
+		FinishReason: FinishReasonStop,
+		Usage:        Usage{TotalTokens: 15},
 	}
 
 	step3 := StepResult{
-		Response: Response{
-			Content: ResponseContent{
-				ReasoningContent{Text: "Let me think..."},
-				FileContent{Data: []byte("data"), MediaType: "text/plain"},
-			},
-			FinishReason: FinishReasonLength,
-			Usage:        Usage{TotalTokens: 20},
+		Content: ResponseContent{
+			ReasoningContent{Text: "Let me think..."},
+			FileContent{Data: []byte("data"), MediaType: "text/plain"},
 		},
+		FinishReason: FinishReasonLength,
+		Usage:        Usage{TotalTokens: 20},
 	}
 
 	t.Run("StepCountIs", func(t *testing.T) {

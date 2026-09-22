@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/taigrr/fantasy"
 	"github.com/charmbracelet/openai-go/packages/param"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
 )
 
 func TestToOpenAiPrompt_SystemMessages(t *testing.T) {

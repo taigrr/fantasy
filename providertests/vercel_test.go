@@ -5,11 +5,11 @@ import (
 	"os"
 	"testing"
 
+	"charm.land/x/vcr"
+	"github.com/stretchr/testify/require"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/anthropic"
 	"github.com/taigrr/fantasy/providers/vercel"
-	"charm.land/x/vcr"
-	"github.com/stretchr/testify/require"
 )
 
 var vercelTestModels = []testModel{

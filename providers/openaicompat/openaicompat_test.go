@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/taigrr/fantasy"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
 )
 
 func TestToPromptFunc_ReasoningContent(t *testing.T) {

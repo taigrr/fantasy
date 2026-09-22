@@ -9,15 +9,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/taigrr/fantasy"
 	"github.com/charmbracelet/openai-go"
+	"github.com/taigrr/fantasy"
 )
 
 var openaiContextPattern = regexp.MustCompile(`maximum context length is (\d+) tokens.*?(?:resulted in|requested) (\d+) tokens`)
 
 func toProviderErr(err error) error {
-	var apiErr *openai.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		message := toProviderErrMessage(apiErr)
 		providerErr := &fantasy.ProviderError{
 			Title:           cmp.Or(fantasy.ErrorTitleForStatusCode(apiErr.StatusCode), "provider request failed"),

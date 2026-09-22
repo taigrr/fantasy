@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/taigrr/fantasy"
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
+	"github.com/taigrr/fantasy"
 )
 
 // Option defines a function that configures Kronk provider options.

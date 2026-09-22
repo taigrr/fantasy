@@ -10,14 +10,14 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/object"
-	"github.com/taigrr/fantasy/schema"
 	"github.com/charmbracelet/openai-go"
 	"github.com/charmbracelet/openai-go/packages/param"
 	"github.com/charmbracelet/openai-go/shared"
 	xjson "github.com/charmbracelet/x/json"
 	"github.com/google/uuid"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/object"
+	"github.com/taigrr/fantasy/schema"
 )
 
 type languageModel struct {
@@ -864,7 +864,7 @@ func (o languageModel) streamObjectWithJSONMode(ctx context.Context, call fantas
 			}
 		}
 
-		var accumulated string
+		var accumulated strings.Builder
 		var lastParsedObject any
 		var usage fantasy.Usage
 		var finishReason fantasy.FinishReason
@@ -887,9 +887,9 @@ func (o languageModel) streamObjectWithJSONMode(ctx context.Context, call fantas
 			}
 
 			if choice.Delta.Content != "" {
-				accumulated += choice.Delta.Content
+				accumulated.WriteString(choice.Delta.Content)
 
-				obj, state, parseErr := schema.ParsePartialJSON(accumulated)
+				obj, state, parseErr := schema.ParsePartialJSON(accumulated.String())
 
 				if state == schema.ParseStateSuccessful || state == schema.ParseStateRepaired {
 					if err := schema.ValidateAgainstSchema(obj, call.Schema); err == nil {
@@ -906,7 +906,7 @@ func (o languageModel) streamObjectWithJSONMode(ctx context.Context, call fantas
 				}
 
 				if state == schema.ParseStateFailed && call.RepairText != nil {
-					repairedText, repairErr := call.RepairText(ctx, accumulated, parseErr)
+					repairedText, repairErr := call.RepairText(ctx, accumulated.String(), parseErr)
 					if repairErr == nil {
 						obj2, state2, _ := schema.ParsePartialJSON(repairedText)
 						if (state2 == schema.ParseStateSuccessful || state2 == schema.ParseStateRepaired) &&
@@ -947,7 +947,7 @@ func (o languageModel) streamObjectWithJSONMode(ctx context.Context, call fantas
 			yield(fantasy.ObjectStreamPart{
 				Type: fantasy.ObjectStreamPartTypeError,
 				Error: &fantasy.NoObjectGeneratedError{
-					RawText:      accumulated,
+					RawText:      accumulated.String(),
 					ParseError:   fmt.Errorf("no valid object generated in stream"),
 					Usage:        usage,
 					FinishReason: finishReason,

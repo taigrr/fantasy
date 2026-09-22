@@ -6,11 +6,11 @@ import (
 	"os"
 	"testing"
 
+	"charm.land/x/vcr"
+	"github.com/stretchr/testify/require"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/azure"
 	"github.com/taigrr/fantasy/providers/openai"
-	"charm.land/x/vcr"
-	"github.com/stretchr/testify/require"
 )
 
 func TestAzureResponsesCommon(t *testing.T) {

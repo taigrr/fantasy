@@ -10,8 +10,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/taigrr/fantasy/jsonrepair"
 	"github.com/kaptinlin/jsonschema"
+	"github.com/taigrr/fantasy/jsonrepair"
 )
 
 // ObjectRepairFunc is a function that attempts to repair invalid JSON output.
@@ -123,8 +123,6 @@ func generateSchemaRecursive(t reflect.Type, visited map[reflect.Type]bool) Sche
 			Properties: make(map[string]*Schema),
 		}
 		for field := range t.Fields() {
-			field := field
-
 			if !field.IsExported() {
 				continue
 			}

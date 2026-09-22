@@ -6,12 +6,12 @@ import (
 	"os"
 	"testing"
 
+	"charm.land/x/vcr"
+	"github.com/stretchr/testify/require"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/anthropic"
 	"github.com/taigrr/fantasy/providers/google"
 	"github.com/taigrr/fantasy/providers/openai"
-	"charm.land/x/vcr"
-	"github.com/stretchr/testify/require"
 )
 
 func anthropicImageBuilder(model string) builderFunc {

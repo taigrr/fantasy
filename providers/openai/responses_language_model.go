@@ -9,14 +9,14 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/object"
-	"github.com/taigrr/fantasy/schema"
 	"github.com/charmbracelet/openai-go"
 	"github.com/charmbracelet/openai-go/packages/param"
 	"github.com/charmbracelet/openai-go/responses"
 	"github.com/charmbracelet/openai-go/shared"
 	"github.com/google/uuid"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/object"
+	"github.com/taigrr/fantasy/schema"
 )
 
 const topLogprobsMax = 20
@@ -397,7 +397,7 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 	for _, msg := range prompt {
 		switch msg.Role {
 		case fantasy.MessageRoleSystem:
-			var systemText string
+			var systemText strings.Builder
 			for _, c := range msg.Content {
 				if c.GetType() != fantasy.ContentTypeText {
 					warnings = append(warnings, fantasy.CallWarning{
@@ -415,11 +415,11 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 					continue
 				}
 				if strings.TrimSpace(textPart.Text) != "" {
-					systemText += textPart.Text
+					systemText.WriteString(textPart.Text)
 				}
 			}
 
-			if systemText == "" {
+			if systemText.String() == "" {
 				warnings = append(warnings, fantasy.CallWarning{
 					Type:    fantasy.CallWarningTypeOther,
 					Message: "system prompt has no text parts",
@@ -429,9 +429,9 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 
 			switch systemMessageMode {
 			case "system":
-				input = append(input, responses.ResponseInputItemParamOfMessage(systemText, responses.EasyInputMessageRoleSystem))
+				input = append(input, responses.ResponseInputItemParamOfMessage(systemText.String(), responses.EasyInputMessageRoleSystem))
 			case "developer":
-				input = append(input, responses.ResponseInputItemParamOfMessage(systemText, responses.EasyInputMessageRoleDeveloper))
+				input = append(input, responses.ResponseInputItemParamOfMessage(systemText.String(), responses.EasyInputMessageRoleDeveloper))
 			case "remove":
 				warnings = append(warnings, fantasy.CallWarning{
 					Type:    fantasy.CallWarningTypeOther,
@@ -1508,7 +1508,7 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 			}
 		}
 
-		var accumulated string
+		var accumulated strings.Builder
 		var lastParsedObject any
 		var usage fantasy.Usage
 		var finishReason fantasy.FinishReason
@@ -1531,10 +1531,10 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 
 			case "response.output_text.delta":
 				textDelta := event.AsResponseOutputTextDelta()
-				accumulated += textDelta.Delta
+				accumulated.WriteString(textDelta.Delta)
 
 				// Try to parse the accumulated text
-				obj, state, parseErr := schema.ParsePartialJSON(accumulated)
+				obj, state, parseErr := schema.ParsePartialJSON(accumulated.String())
 
 				// If we successfully parsed, validate and emit
 				if state == schema.ParseStateSuccessful || state == schema.ParseStateRepaired {
@@ -1554,7 +1554,7 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 
 				// If parsing failed and we have a repair function, try it
 				if state == schema.ParseStateFailed && call.RepairText != nil {
-					repairedText, repairErr := call.RepairText(ctx, accumulated, parseErr)
+					repairedText, repairErr := call.RepairText(ctx, accumulated.String(), parseErr)
 					if repairErr == nil {
 						obj2, state2, _ := schema.ParsePartialJSON(repairedText)
 						if (state2 == schema.ParseStateSuccessful || state2 == schema.ParseStateRepaired) &&
@@ -1619,7 +1619,7 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 			yield(fantasy.ObjectStreamPart{
 				Type: fantasy.ObjectStreamPartTypeError,
 				Error: &fantasy.NoObjectGeneratedError{
-					RawText:      accumulated,
+					RawText:      accumulated.String(),
 					ParseError:   fmt.Errorf("no valid object generated in stream"),
 					Usage:        usage,
 					FinishReason: finishReason,

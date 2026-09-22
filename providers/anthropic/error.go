@@ -9,15 +9,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/taigrr/fantasy"
 	"github.com/charmbracelet/anthropic-sdk-go"
+	"github.com/taigrr/fantasy"
 )
 
 var anthropicContextPattern = regexp.MustCompile(`prompt is too long:\s*(\d+)\s*tokens?\s*>\s*(\d+)\s*maximum`)
 
 func toProviderErr(err error) error {
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*anthropic.Error](err); ok {
 		providerErr := &fantasy.ProviderError{
 			Title:           cmp.Or(fantasy.ErrorTitleForStatusCode(apiErr.StatusCode), "provider request failed"),
 			Message:         apiErr.Error(),

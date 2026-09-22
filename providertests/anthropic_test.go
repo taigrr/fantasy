@@ -7,10 +7,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/anthropic"
 	"charm.land/x/vcr"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/anthropic"
 )
 
 var anthropicTestModels = []testModel{
@@ -26,8 +26,9 @@ func TestAnthropicCommon(t *testing.T) {
 }
 
 func addAnthropicCaching(ctx context.Context, options fantasy.PrepareStepFunctionOptions) (context.Context, fantasy.PrepareStepResult, error) {
-	prepared := fantasy.PrepareStepResult{}
-	prepared.Messages = options.Messages
+	prepared := fantasy.PrepareStepResult{
+		Messages: options.Messages,
+	}
 
 	for i := range prepared.Messages {
 		prepared.Messages[i].ProviderOptions = nil

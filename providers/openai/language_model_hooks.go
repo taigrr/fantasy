@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/taigrr/fantasy"
 	"github.com/charmbracelet/openai-go"
 	"github.com/charmbracelet/openai-go/packages/param"
 	"github.com/charmbracelet/openai-go/shared"
+	"github.com/taigrr/fantasy"
 )
 
 // LanguageModelPrepareCallFunc is a function that prepares the call for the language model.

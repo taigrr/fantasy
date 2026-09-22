@@ -7,12 +7,12 @@ import (
 	"maps"
 	"strings"
 
+	openaisdk "github.com/charmbracelet/openai-go"
+	"github.com/charmbracelet/openai-go/packages/param"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/anthropic"
 	"github.com/taigrr/fantasy/providers/google"
 	openaipkg "github.com/taigrr/fantasy/providers/openai"
-	openaisdk "github.com/charmbracelet/openai-go"
-	"github.com/charmbracelet/openai-go/packages/param"
 )
 
 const reasoningStartedCtx = "reasoning_started"

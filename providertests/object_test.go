@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/taigrr/fantasy"
 	"charm.land/x/vcr"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
 )
 
 // Object generation tests for providers.

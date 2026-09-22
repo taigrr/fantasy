@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/anthropic"
 	"github.com/taigrr/fantasy/providers/google"
 	"github.com/taigrr/fantasy/providers/openai"
 	"github.com/taigrr/fantasy/providers/openaicompat"
 	"github.com/taigrr/fantasy/providers/openrouter"
-	"github.com/stretchr/testify/require"
 )
 
 func TestProviderRegistry_Serialization_OpenAIOptions(t *testing.T) {

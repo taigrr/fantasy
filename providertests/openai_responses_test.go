@@ -5,10 +5,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/openai"
 	"charm.land/x/vcr"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/openai"
 )
 
 func TestOpenAIResponsesCommon(t *testing.T) {

@@ -6,12 +6,12 @@ import (
 	"errors"
 	"io"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/object"
 	"github.com/ardanlabs/kronk/sdk/kronk"
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	xjson "github.com/charmbracelet/x/json"
 	"github.com/google/uuid"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/object"
 )
 
 type languageModel struct {

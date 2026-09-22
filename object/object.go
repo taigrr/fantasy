@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/schema"
@@ -514,7 +515,7 @@ func StreamWithText(
 	}
 
 	return func(yield func(fantasy.ObjectStreamPart) bool) {
-		var accumulated string
+		var accumulated strings.Builder
 		var lastParsedObject any
 		var usage fantasy.Usage
 		var finishReason fantasy.FinishReason
@@ -525,9 +526,9 @@ func StreamWithText(
 		for part := range stream {
 			switch part.Type {
 			case fantasy.StreamPartTypeTextDelta:
-				accumulated += part.Delta
+				accumulated.WriteString(part.Delta)
 
-				obj, state, parseErr := schema.ParsePartialJSON(accumulated)
+				obj, state, parseErr := schema.ParsePartialJSON(accumulated.String())
 
 				if state == schema.ParseStateSuccessful || state == schema.ParseStateRepaired {
 					if err := schema.ValidateAgainstSchema(obj, call.Schema); err == nil {
@@ -544,7 +545,7 @@ func StreamWithText(
 				}
 
 				if state == schema.ParseStateFailed && call.RepairText != nil {
-					repairedText, repairErr := call.RepairText(ctx, accumulated, parseErr)
+					repairedText, repairErr := call.RepairText(ctx, accumulated.String(), parseErr)
 					if repairErr == nil {
 						obj2, state2, _ := schema.ParsePartialJSON(repairedText)
 						if (state2 == schema.ParseStateSuccessful || state2 == schema.ParseStateRepaired) &&
@@ -596,7 +597,7 @@ func StreamWithText(
 			yield(fantasy.ObjectStreamPart{
 				Type: fantasy.ObjectStreamPartTypeError,
 				Error: &fantasy.NoObjectGeneratedError{
-					RawText:      accumulated,
+					RawText:      accumulated.String(),
 					ParseError:   fmt.Errorf("no valid object generated in stream"),
 					Usage:        usage,
 					FinishReason: finishReason,

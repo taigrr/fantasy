@@ -1,9 +1,9 @@
 package anthropic
 
 import (
+	"github.com/charmbracelet/anthropic-sdk-go/option"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/internal/httpheaders"
-	"github.com/charmbracelet/anthropic-sdk-go/option"
 )
 
 func callUARequestOptions(call fantasy.Call) []option.RequestOption {

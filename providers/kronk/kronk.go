@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/taigrr/fantasy"
 	"github.com/ardanlabs/kronk/sdk/kronk"
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/ardanlabs/kronk/sdk/tools/libs"
 	"github.com/ardanlabs/kronk/sdk/tools/models"
+	"github.com/taigrr/fantasy"
 )
 
 const (

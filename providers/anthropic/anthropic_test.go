@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/taigrr/fantasy"
 	"github.com/charmbracelet/anthropic-sdk-go"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
 )
 
 // noopComputerRun is a no-op run function for tests that only need

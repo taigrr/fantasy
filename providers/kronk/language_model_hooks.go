@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/taigrr/fantasy"
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
+	"github.com/taigrr/fantasy"
 )
 
 // LanguageModelPrepareCallFunc is a function that prepares the call for the language model.
@@ -164,7 +164,7 @@ func DefaultToPrompt(prompt fantasy.Prompt, _ string, _ string) ([]model.D, []fa
 			}
 
 		case fantasy.MessageRoleAssistant:
-			var textContent string
+			var textContent strings.Builder
 			var toolCalls []model.D
 
 			for _, c := range msg.Content {
@@ -180,7 +180,7 @@ func DefaultToPrompt(prompt fantasy.Prompt, _ string, _ string) ([]model.D, []fa
 						continue
 					}
 
-					textContent += textPart.Text
+					textContent.WriteString(textPart.Text)
 
 				case fantasy.ContentTypeToolCall:
 					toolCallPart, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](c)
@@ -208,15 +208,15 @@ func DefaultToPrompt(prompt fantasy.Prompt, _ string, _ string) ([]model.D, []fa
 				"role": model.RoleAssistant,
 			}
 
-			if textContent != "" {
-				assistantMsg["content"] = textContent
+			if textContent.String() != "" {
+				assistantMsg["content"] = textContent.String()
 			}
 
 			if len(toolCalls) > 0 {
 				assistantMsg["tool_calls"] = toolCalls
 			}
 
-			if textContent != "" || len(toolCalls) > 0 {
+			if textContent.String() != "" || len(toolCalls) > 0 {
 				messages = append(messages, assistantMsg)
 			}
 

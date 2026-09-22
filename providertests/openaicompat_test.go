@@ -5,11 +5,11 @@ import (
 	"os"
 	"testing"
 
+	"charm.land/x/vcr"
+	"github.com/stretchr/testify/require"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/openai"
 	"github.com/taigrr/fantasy/providers/openaicompat"
-	"charm.land/x/vcr"
-	"github.com/stretchr/testify/require"
 )
 
 func TestOpenAICompatibleCommon(t *testing.T) {

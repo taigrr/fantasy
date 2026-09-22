@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/openai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/openai"
 )
 
 func TestUserAgent(t *testing.T) {

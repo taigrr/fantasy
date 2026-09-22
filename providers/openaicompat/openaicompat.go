@@ -2,9 +2,9 @@
 package openaicompat
 
 import (
+	"github.com/charmbracelet/openai-go/option"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/openai"
-	"github.com/charmbracelet/openai-go/option"
 )
 
 type options struct {

@@ -11,8 +11,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/taigrr/fantasy/schema"
 	"github.com/charmbracelet/x/exp/slice"
+	"github.com/taigrr/fantasy/schema"
 )
 
 // StepResult represents the result of a single step in an agent execution.
@@ -523,14 +523,12 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 		responseMessages = append(responseMessages, currentStepMessages...)
 
 		stepResult := StepResult{
-			Response: Response{
-				Content:          stepContent,
-				FinishReason:     result.FinishReason,
-				Usage:            result.Usage,
-				Warnings:         result.Warnings,
-				ProviderMetadata: result.ProviderMetadata,
-			},
-			Messages: currentStepMessages,
+			Content:          stepContent,
+			FinishReason:     result.FinishReason,
+			Usage:            result.Usage,
+			Warnings:         result.Warnings,
+			ProviderMetadata: result.ProviderMetadata,
+			Messages:         currentStepMessages,
 		}
 		steps = append(steps, stepResult)
 		shouldStop := isStopConditionMet(opts.StopWhen, steps)
@@ -1597,14 +1595,12 @@ func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, op
 	}
 
 	stepResult := StepResult{
-		Response: Response{
-			Content:          stepContent,
-			FinishReason:     stepFinishReason,
-			Usage:            stepUsage,
-			Warnings:         stepWarnings,
-			ProviderMetadata: stepProviderMetadata,
-		},
-		Messages: toResponseMessages(stepContent),
+		Content:          stepContent,
+		FinishReason:     stepFinishReason,
+		Usage:            stepUsage,
+		Warnings:         stepWarnings,
+		ProviderMetadata: stepProviderMetadata,
+		Messages:         toResponseMessages(stepContent),
 	}
 
 	// Determine if we should continue (has tool calls and not stopped)

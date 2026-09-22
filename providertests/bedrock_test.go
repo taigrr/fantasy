@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
+	"charm.land/x/vcr"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/bedrock"
-	"charm.land/x/vcr"
 )
 
 func TestBedrockCommon(t *testing.T) {

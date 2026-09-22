@@ -867,8 +867,8 @@ func (p *parser) parseString() (any, error) {
 					if j-i > 1 {
 						rstringDelimiterMissing = false
 					} else if _, ok := p.getCharAt(j); ok {
-						for k := len(stringAcc) - 1; k >= 0; k-- {
-							if stringAcc[k] == '{' {
+						for _, s := range slices.Backward(stringAcc) {
+							if s == '{' {
 								rstringDelimiterMissing = false
 								break
 							}

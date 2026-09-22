@@ -4,8 +4,8 @@ import (
 	"encoding/base64"
 	"testing"
 
-	"github.com/taigrr/fantasy"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
 )
 
 // Tool messages in the OpenAI Chat Completions API cannot carry image or audio

@@ -6,10 +6,10 @@ import (
 	"context"
 	"maps"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/internal/httpheaders"
 	"github.com/charmbracelet/openai-go"
 	"github.com/charmbracelet/openai-go/option"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/internal/httpheaders"
 )
 
 const (

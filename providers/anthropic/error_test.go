@@ -22,7 +22,6 @@ func TestToProviderErr_WrapsUnexpectedEOF(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -60,8 +59,7 @@ func TestToProviderErr_PassesThroughPlainEOF(t *testing.T) {
 	// calls toProviderErr with io.EOF. But if it ever did, we should not
 	// wrap it: io.EOF is not "retryable" in the ProviderError sense.
 	got := toProviderErr(io.EOF)
-	var providerErr *fantasy.ProviderError
-	if errors.As(got, &providerErr) {
+	if _, ok := errors.AsType[*fantasy.ProviderError](got); ok {
 		t.Errorf("toProviderErr wrapped io.EOF as ProviderError; should pass through")
 	}
 }

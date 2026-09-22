@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/taigrr/fantasy"
 	anthropicsdk "github.com/charmbracelet/anthropic-sdk-go"
 	"github.com/charmbracelet/anthropic-sdk-go/packages/param"
+	"github.com/taigrr/fantasy"
 )
 
 // computerUseToolID is the canonical identifier for

@@ -12,12 +12,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/anthropic"
 	"github.com/charmbracelet/lipgloss/v2"
 	"github.com/charmbracelet/lipgloss/v2/table"
 	"github.com/charmbracelet/log/v2"
 	"github.com/charmbracelet/x/term"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/anthropic"
 )
 
 const systemPrompt = `

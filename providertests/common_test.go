@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/taigrr/fantasy"
 	"charm.land/x/vcr"
 	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
 )
 
 func init() {

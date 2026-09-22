@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/google"
 	"charm.land/x/vcr"
 	"github.com/stretchr/testify/require"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/google"
 )
 
 var geminiTestModels = []testModel{

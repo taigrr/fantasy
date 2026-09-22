@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/openai"
 	openaisdk "github.com/charmbracelet/openai-go"
 	"github.com/charmbracelet/openai-go/packages/param"
 	"github.com/charmbracelet/openai-go/shared"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/openai"
 )
 
 const reasoningStartedCtx = "reasoning_started"

@@ -6,10 +6,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/openai"
 	"github.com/charmbracelet/openai-go/azure"
 	"github.com/charmbracelet/openai-go/option"
+	"github.com/taigrr/fantasy"
+	"github.com/taigrr/fantasy/providers/openai"
 )
 
 type options struct {
