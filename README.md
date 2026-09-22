@@ -64,6 +64,28 @@ fmt.Println(result.Response.Content.Text())
 
 Yeah! Fantasy is designed to support a wide variety of providers and models under a single API. While many providers such as Microsoft Azure, Amazon Bedrock, and OpenRouter have dedicated packages in Fantasy, many others work just fine with `openaicompat`, the generic OpenAI-compatible layer. That said, if you find a provider that’s not compatible and needs special treatment, please let us know in an issue (or open a PR).
 
+## Decision models (Jev, Kev)
+
+Beyond chat and embeddings, Fantasy supports *evaluation* models such as TypeSafe's [Jev](https://docs.typesafe.ai) and the open-weight [Kev](https://github.com/jaredpalmer/kev).
+These answer typed questions about a state with calibrated probabilities instead of generating text.
+Providers that support them implement `fantasy.EvaluationProvider`: `providers/vercel` (AI Gateway, model `typesafe-ai/jev`), `providers/typesafe` (native API, or a running Kev server via `WithBaseURL`), and `providers/kev` (Kev fully in-process via llama.cpp, weights downloaded on first use).
+
+```go
+ep := provider.(fantasy.EvaluationProvider)
+model, _ := ep.EvaluationModel(ctx, vercel.ModelJev)
+resp, err := model.Evaluate(ctx, fantasy.EvaluationCall{
+    State: "I was charged twice. Fix this today.",
+    Questions: map[string]fantasy.EvaluationQuestion{
+        "refund":  fantasy.BoolQuestion("Is the customer asking for money back?"),
+        "route":   fantasy.ChoiceQuestion("Route this ticket.", map[string]string{"billing": "", "shipping": ""}),
+        "urgency": fantasy.ScoreQuestion("How urgent?", "low", "medium", "high"),
+    },
+})
+resp.Answers["refund"].Yes()
+resp.Answers["route"].Choice
+resp.Answers["urgency"].Level()
+```
+
 ## Work in Progress
 
 We built Fantasy to power [Crush](https://github.com/charmbracelet/crush), a hot coding agent for glamourously invincible development. Given that, Fantasy does not yet support things like:

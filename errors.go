@@ -208,8 +208,7 @@ func extractHTTP2ErrorMessage(err error) string {
 // "connection error: CODE" collapses to "CODE".
 func cleanHTTP2ErrorMessage(msg string) string {
 	// "stream error: stream ID N; CODE[; cause]".
-	if idx := strings.Index(msg, "; "); idx != -1 {
-		rest := msg[idx+2:]
+	if _, rest, ok := strings.Cut(msg, "; "); ok {
 		code, cause, hasCause := strings.Cut(rest, "; ")
 		if hasCause {
 			return fmt.Sprintf("%s (%s)", code, cause)

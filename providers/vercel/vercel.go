@@ -2,9 +2,13 @@
 package vercel
 
 import (
+	"context"
+	"fmt"
+	"maps"
+
+	"github.com/charmbracelet/openai-go/option"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/openai"
-	"github.com/charmbracelet/openai-go/option"
 )
 
 type options struct {
@@ -12,6 +16,7 @@ type options struct {
 	languageModelOptions []openai.LanguageModelOption
 	sdkOptions           []option.RequestOption
 	objectMode           fantasy.ObjectMode
+	evaluation           evaluationOptions
 }
 
 const (
@@ -27,6 +32,7 @@ type Option = func(*options)
 // New creates a new Vercel AI Gateway provider with the given options.
 func New(opts ...Option) (fantasy.Provider, error) {
 	providerOptions := options{
+		evaluation: newEvaluationOptions(),
 		openaiOptions: []openai.Option{
 			openai.WithName(Name),
 			openai.WithBaseURL(DefaultURL),
@@ -58,13 +64,34 @@ func New(opts ...Option) (fantasy.Provider, error) {
 		openai.WithLanguageModelOptions(providerOptions.languageModelOptions...),
 		openai.WithObjectMode(objectMode),
 	)
-	return openai.New(providerOptions.openaiOptions...)
+	inner, err := openai.New(providerOptions.openaiOptions...)
+	if err != nil {
+		return nil, err
+	}
+	return &provider{Provider: inner, evaluation: providerOptions.evaluation}, nil
+}
+
+// provider wraps the OpenAI-compatible chat provider and adds the gateway's
+// evaluation modality, which is not exposed on the OpenAI-compatible surface.
+type provider struct {
+	fantasy.Provider
+	evaluation evaluationOptions
+}
+
+// EmbeddingModel forwards to the wrapped provider.
+func (p *provider) EmbeddingModel(ctx context.Context, modelID string) (fantasy.EmbeddingModel, error) {
+	ep, ok := p.Provider.(fantasy.EmbeddingProvider)
+	if !ok {
+		return nil, fmt.Errorf("%s: embeddings are not supported", p.Name())
+	}
+	return ep.EmbeddingModel(ctx, modelID)
 }
 
 // WithAPIKey sets the API key for the Vercel provider.
 func WithAPIKey(apiKey string) Option {
 	return func(o *options) {
 		o.openaiOptions = append(o.openaiOptions, openai.WithAPIKey(apiKey))
+		o.evaluation.apiKey = apiKey
 	}
 }
 
@@ -72,6 +99,7 @@ func WithAPIKey(apiKey string) Option {
 func WithBaseURL(url string) Option {
 	return func(o *options) {
 		o.openaiOptions = append(o.openaiOptions, openai.WithBaseURL(url))
+		o.evaluation.baseURL = url
 	}
 }
 
@@ -79,6 +107,7 @@ func WithBaseURL(url string) Option {
 func WithName(name string) Option {
 	return func(o *options) {
 		o.openaiOptions = append(o.openaiOptions, openai.WithName(name))
+		o.evaluation.name = name
 	}
 }
 
@@ -86,6 +115,7 @@ func WithName(name string) Option {
 func WithHeaders(headers map[string]string) Option {
 	return func(o *options) {
 		o.openaiOptions = append(o.openaiOptions, openai.WithHeaders(headers))
+		maps.Copy(o.evaluation.headers, headers)
 	}
 }
 
@@ -93,6 +123,7 @@ func WithHeaders(headers map[string]string) Option {
 func WithHTTPClient(client option.HTTPClient) Option {
 	return func(o *options) {
 		o.openaiOptions = append(o.openaiOptions, openai.WithHTTPClient(client))
+		o.evaluation.httpClient = client
 	}
 }
 
@@ -101,6 +132,7 @@ func WithHTTPClient(client option.HTTPClient) Option {
 func WithUserAgent(ua string) Option {
 	return func(o *options) {
 		o.openaiOptions = append(o.openaiOptions, openai.WithUserAgent(ua))
+		o.evaluation.userAgent = ua
 	}
 }
 
