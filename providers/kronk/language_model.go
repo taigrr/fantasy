@@ -221,7 +221,7 @@ func (l *languageModel) Generate(ctx context.Context, call fantasy.Call) (*fanta
 			InputTokens:     int64(lastResponse.Usage.PromptTokens),
 			OutputTokens:    int64(lastResponse.Usage.CompletionTokens),
 			TotalTokens:     int64(lastResponse.Usage.PromptTokens + lastResponse.Usage.CompletionTokens),
-			ReasoningTokens: int64(lastResponse.Usage.ReasoningTokens),
+			ReasoningTokens: int64(lastResponse.Usage.CompletionTokensDetails.ReasoningTokens),
 		}
 	}
 
@@ -235,7 +235,7 @@ func (l *languageModel) Generate(ctx context.Context, call fantasy.Call) (*fanta
 		providerMetadata = fantasy.ProviderMetadata{
 			Name: &ProviderMetadata{
 				TokensPerSecond: lastResponse.Usage.TokensPerSecond,
-				OutputTokens:    int64(lastResponse.Usage.OutputTokens),
+				OutputTokens:    int64(lastResponse.Usage.CompletionTokens),
 			},
 		}
 	}
@@ -300,13 +300,13 @@ func (l *languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.
 					InputTokens:     int64(resp.Usage.PromptTokens),
 					OutputTokens:    int64(resp.Usage.CompletionTokens),
 					TotalTokens:     int64(resp.Usage.PromptTokens + resp.Usage.CompletionTokens),
-					ReasoningTokens: int64(resp.Usage.ReasoningTokens),
+					ReasoningTokens: int64(resp.Usage.CompletionTokensDetails.ReasoningTokens),
 				}
 
 				if pm, ok := providerMetadata[Name]; ok {
 					if metadata, ok := pm.(*ProviderMetadata); ok {
 						metadata.TokensPerSecond = resp.Usage.TokensPerSecond
-						metadata.OutputTokens = int64(resp.Usage.OutputTokens)
+						metadata.OutputTokens = int64(resp.Usage.CompletionTokens)
 					}
 				}
 			}
