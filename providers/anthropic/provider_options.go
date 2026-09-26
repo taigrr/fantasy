@@ -67,10 +67,12 @@ func init() {
 
 // ProviderOptions represents additional options for the Anthropic provider.
 type ProviderOptions struct {
-	SendReasoning          *bool                   `json:"send_reasoning"`
-	Thinking               *ThinkingProviderOption `json:"thinking"`
-	Effort                 *Effort                 `json:"effort"`
-	DisableParallelToolUse *bool                   `json:"disable_parallel_tool_use"`
+	SendReasoning *bool                   `json:"send_reasoning"`
+	Thinking      *ThinkingProviderOption `json:"thinking"`
+	// ThinkingDisplay controls adaptive thinking text: summarized or omitted.
+	ThinkingDisplay        *string `json:"thinking_display,omitempty"`
+	Effort                 *Effort `json:"effort"`
+	DisableParallelToolUse *bool   `json:"disable_parallel_tool_use"`
 	// Betas is a list of beta features to enable (e.g., "context-1m-2025-08-07" for 1M context on Bedrock).
 	Betas []string `json:"betas,omitempty"`
 }
