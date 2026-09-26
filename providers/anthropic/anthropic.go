@@ -334,12 +334,16 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 	}
 
 	switch {
-	case providerOptions.Effort != nil:
-		effort := *providerOptions.Effort
-		params.OutputConfig = anthropic.OutputConfigParam{
-			Effort: anthropic.OutputConfigEffort(effort),
+	case providerOptions.Effort != nil || providerOptions.ThinkingDisplay != nil:
+		if providerOptions.Effort != nil {
+			params.OutputConfig = anthropic.OutputConfigParam{
+				Effort: anthropic.OutputConfigEffort(*providerOptions.Effort),
+			}
 		}
 		adaptive := anthropic.NewThinkingConfigAdaptiveParam()
+		if providerOptions.ThinkingDisplay != nil {
+			adaptive.SetExtraFields(map[string]any{"display": *providerOptions.ThinkingDisplay})
+		}
 		params.Thinking.OfAdaptive = &adaptive
 	case providerOptions.Thinking != nil:
 		if providerOptions.Thinking.BudgetTokens == 0 {
