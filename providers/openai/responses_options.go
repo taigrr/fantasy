@@ -250,6 +250,18 @@ var responsesReasoningModelIDs = []string{
 	"gpt-5.6-mini",
 	"gpt-5.6-nano",
 	"gpt-5.6-codex",
+	"gpt-6-astra",
+	"gpt-6-sol",
+	"gpt-6-luna",
+	"openai.gpt-6-astra",
+	"openai.gpt-6-sol",
+	"openai.gpt-6-luna",
+	"us.openai.gpt-6-astra",
+	"us.openai.gpt-6-sol",
+	"us.openai.gpt-6-luna",
+	"global.openai.gpt-6-astra",
+	"global.openai.gpt-6-sol",
+	"global.openai.gpt-6-luna",
 	"gpt-oss-120b",
 }
 
