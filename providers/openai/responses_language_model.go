@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/openai-go"
@@ -57,7 +58,8 @@ type responsesModelConfig struct {
 func getResponsesModelConfig(modelID string) responsesModelConfig {
 	supportsFlexProcessing := strings.HasPrefix(modelID, "o3") ||
 		strings.Contains(modelID, "-o3") || strings.Contains(modelID, "o4-mini") ||
-		(strings.Contains(modelID, "gpt-5") && !strings.Contains(modelID, "gpt-5-chat"))
+		(strings.Contains(modelID, "gpt-5") && !strings.Contains(modelID, "gpt-5-chat")) ||
+		strings.HasPrefix(modelID, "gpt-6-")
 
 	supportsPriorityProcessing := strings.Contains(modelID, "gpt-4") ||
 		strings.Contains(modelID, "gpt-5-mini") ||
@@ -89,7 +91,7 @@ func getResponsesModelConfig(modelID string) responsesModelConfig {
 		strings.HasPrefix(modelID, "o3") || strings.Contains(modelID, "-o3") ||
 		strings.HasPrefix(modelID, "o4") || strings.Contains(modelID, "-o4") ||
 		strings.HasPrefix(modelID, "oss") || strings.Contains(modelID, "-oss") ||
-		strings.Contains(modelID, "gpt-5") || strings.Contains(modelID, "codex-") ||
+		strings.Contains(modelID, "gpt-5") || strings.Contains(modelID, "gpt-6-") || strings.Contains(modelID, "codex-") ||
 		strings.Contains(modelID, "computer-use") {
 		if strings.Contains(modelID, "o1-mini") || strings.Contains(modelID, "o1-preview") {
 			return responsesModelConfig{
@@ -280,7 +282,19 @@ func (o responsesLanguageModel) prepareParams(call fantasy.Call) (*responses.Res
 		params.Include = includeParams
 	}
 
-	if modelConfig.isReasoningModel {
+	gpt6 := strings.Contains(o.modelID, "gpt-6-")
+	reasoningEnabled := modelConfig.isReasoningModel && !(gpt6 && params.Reasoning.Effort == shared.ReasoningEffortNone)
+	if reasoningEnabled {
+		if gpt6 && (params.TopLogprobs.Valid() || slices.Contains(params.Include, responses.ResponseIncludable(IncludeMessageOutputTextLogprobs))) {
+			params.TopLogprobs = param.Opt[int64]{}
+			params.Include = slices.DeleteFunc(params.Include, func(item responses.ResponseIncludable) bool {
+				return item == responses.ResponseIncludable(IncludeMessageOutputTextLogprobs)
+			})
+			warnings = append(warnings, fantasy.CallWarning{
+				Type: fantasy.CallWarningTypeUnsupportedSetting, Setting: "logprobs",
+				Details: "logprobs is not supported when GPT-6 reasoning is enabled",
+			})
+		}
 		if call.Temperature != nil {
 			params.Temperature = param.Opt[float64]{}
 			warnings = append(warnings, fantasy.CallWarning{
@@ -298,7 +312,7 @@ func (o responsesLanguageModel) prepareParams(call fantasy.Call) (*responses.Res
 				Details: "topP is not supported for reasoning models",
 			})
 		}
-	} else {
+	} else if !modelConfig.isReasoningModel {
 		if openaiOptions != nil {
 			if openaiOptions.ReasoningEffort != nil {
 				warnings = append(warnings, fantasy.CallWarning{
