@@ -50,9 +50,45 @@ func thinkingDisplay(providerOptions *ProviderOptions, modelID string) (Thinking
 	return "", false
 }
 
+// adaptiveOnlyThinkingFamilies are the model families whose thinking is
+// always on and adaptive: they reject both `thinking.type: disabled` and
+// a manual `budget_tokens`, so the only supported request shape is
+// adaptive thinking with an optional effort. Matched by substring so
+// platform-qualified ids (e.g. Bedrock's `us.anthropic.` prefix) resolve
+// the same as the bare alias.
+var adaptiveOnlyThinkingFamilies = []string{
+	"claude-mythos-preview",
+	"claude-opus-5-5",
+}
+
+// defaultsToAdaptiveThinking reports whether the model must always be sent
+// adaptive thinking, even when the caller did not ask for thinking at all.
 func defaultsToAdaptiveThinking(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.Contains(model, "claude-mythos-preview")
+	for _, family := range adaptiveOnlyThinkingFamilies {
+		if strings.Contains(model, family) {
+			return true
+		}
+	}
+	return false
+}
+
+// forcedToolChoiceRejectingFamilies are the model families that return a
+// 400 for tool_choice "any" or a specific tool; only "auto" and "none"
+// are accepted.
+var forcedToolChoiceRejectingFamilies = []string{
+	"claude-opus-5-5",
+}
+
+// rejectsForcedToolChoice reports whether the model refuses forced tool use.
+func rejectsForcedToolChoice(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	for _, family := range forcedToolChoiceRejectingFamilies {
+		if strings.Contains(model, family) {
+			return true
+		}
+	}
+	return false
 }
 
 // requiresAdaptiveThinking reports whether the model rejects a manual
@@ -109,6 +145,38 @@ func defaultsToOmittedOpusThinkingDisplay(model string) bool {
 	}
 	minor, err := strconv.Atoi(suffix[:versionEnd])
 	return err == nil && minor >= 7
+}
+
+// stripSamplingParams clears temperature, top_p and top_k from params when
+// the API would reject them, emitting one warning per setting the caller
+// actually set. reason completes the sentence "<setting> is not supported
+// <reason>".
+func stripSamplingParams(params *anthropic.MessageNewParams, call fantasy.Call, warnings []fantasy.CallWarning, reason string) []fantasy.CallWarning {
+	if call.Temperature != nil && params.Temperature.Valid() {
+		params.Temperature = param.Opt[float64]{}
+		warnings = append(warnings, fantasy.CallWarning{
+			Type:    fantasy.CallWarningTypeUnsupportedSetting,
+			Setting: "temperature",
+			Details: "temperature is not supported " + reason,
+		})
+	}
+	if call.TopP != nil && params.TopP.Valid() {
+		params.TopP = param.Opt[float64]{}
+		warnings = append(warnings, fantasy.CallWarning{
+			Type:    fantasy.CallWarningTypeUnsupportedSetting,
+			Setting: "TopP",
+			Details: "TopP is not supported " + reason,
+		})
+	}
+	if call.TopK != nil && params.TopK.Valid() {
+		params.TopK = param.Opt[int64]{}
+		warnings = append(warnings, fantasy.CallWarning{
+			Type:    fantasy.CallWarningTypeUnsupportedSetting,
+			Setting: "TopK",
+			Details: "TopK is not supported " + reason,
+		})
+	}
+	return warnings
 }
 
 // buildRequestOptions constructs the common request options shared
@@ -450,36 +518,20 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 				setThinkingDisplay(params.Thinking.OfEnabled, display)
 			}
 		}
-		if call.Temperature != nil {
-			params.Temperature = param.Opt[float64]{}
-			warnings = append(warnings, fantasy.CallWarning{
-				Type:    fantasy.CallWarningTypeUnsupportedSetting,
-				Setting: "temperature",
-				Details: "temperature is not supported when thinking is enabled",
-			})
-		}
-		if call.TopP != nil {
-			params.TopP = param.Opt[float64]{}
-			warnings = append(warnings, fantasy.CallWarning{
-				Type:    fantasy.CallWarningTypeUnsupportedSetting,
-				Setting: "TopP",
-				Details: "TopP is not supported when thinking is enabled",
-			})
-		}
-		if call.TopK != nil {
-			params.TopK = param.Opt[int64]{}
-			warnings = append(warnings, fantasy.CallWarning{
-				Type:    fantasy.CallWarningTypeUnsupportedSetting,
-				Setting: "TopK",
-				Details: "TopK is not supported when thinking is enabled",
-			})
-		}
+		warnings = stripSamplingParams(params, call, warnings, "when thinking is enabled")
 	case defaultsToAdaptiveThinking(a.modelID):
 		adaptive := anthropic.ThinkingConfigAdaptiveParam{}
 		if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
 			setThinkingDisplay(&adaptive, display)
 		}
 		params.Thinking.OfAdaptive = &adaptive
+	}
+
+	// Adaptive-only models have thinking permanently on and reject any
+	// non-default sampling parameter with a 400, whichever branch above
+	// selected the thinking config.
+	if defaultsToAdaptiveThinking(a.modelID) {
+		warnings = stripSamplingParams(params, call, warnings, "by this model")
 	}
 
 	if len(call.Tools) > 0 {
@@ -864,6 +916,16 @@ func (a languageModel) toTools(tools []fantasy.Tool, toolChoice *fantasy.ToolCho
 			}
 		}
 		return rawTools, anthropicToolChoice, warnings, betaFlags
+	}
+
+	if rejectsForcedToolChoice(a.modelID) && *toolChoice != fantasy.ToolChoiceAuto && *toolChoice != fantasy.ToolChoiceNone {
+		warnings = append(warnings, fantasy.CallWarning{
+			Type:    fantasy.CallWarningTypeUnsupportedSetting,
+			Setting: "toolChoice",
+			Details: fmt.Sprintf("forced tool use %q is not supported by this model; falling back to auto", string(*toolChoice)),
+		})
+		auto := fantasy.ToolChoiceAuto
+		toolChoice = &auto
 	}
 
 	switch *toolChoice {

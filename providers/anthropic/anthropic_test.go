@@ -735,6 +735,33 @@ func TestGenerate_SendsThinkingDisplay(t *testing.T) {
 			wantDisplay: "summarized",
 		},
 		{
+			name:  "opus 5.5 defaults to adaptive thinking",
+			model: "claude-opus-5-5",
+			options: func() *ProviderOptions {
+				return &ProviderOptions{}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "bedrock opus 5.5 defaults to adaptive thinking",
+			model: "us.anthropic.claude-opus-5-5",
+			options: func() *ProviderOptions {
+				return &ProviderOptions{}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "opus 5.5 ignores budget thinking",
+			model: "claude-opus-5-5",
+			options: func() *ProviderOptions {
+				return &ProviderOptions{Thinking: &ThinkingProviderOption{BudgetTokens: 2048}}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
 			name:  "opus models use adaptive thinking when budget thinking configured",
 			model: "claude-opus-4-7",
 			options: func() *ProviderOptions {
@@ -832,6 +859,8 @@ func TestDefaultsToOmittedThinkingDisplay(t *testing.T) {
 		{name: "bedrock mythos preview", model: "anthropic.claude-mythos-preview", want: true},
 		// The 5 generation also defaults to an omitted display.
 		{name: "opus 5", model: "claude-opus-5", want: true},
+		{name: "opus 5.5", model: "claude-opus-5-5", want: true},
+		{name: "bedrock opus 5.5", model: "us.anthropic.claude-opus-5-5", want: true},
 		{name: "opus 5 dated", model: "claude-opus-5-20260115", want: true},
 		{name: "bedrock opus 5", model: "us.anthropic.claude-opus-5-v1:0", want: true},
 		{name: "sonnet 5", model: "claude-sonnet-5", want: true},
@@ -2174,6 +2203,40 @@ func TestGenerate_ToolChoiceNone(t *testing.T) {
 	require.Equal(t, "none", toolChoice["type"], "tool_choice should be 'none'")
 }
 
+func TestGenerate_ForcedToolChoiceFallsBackToAutoOnOpus55(t *testing.T) {
+	t.Parallel()
+
+	for _, choice := range []fantasy.ToolChoice{fantasy.ToolChoiceRequired, fantasy.ToolChoice("test")} {
+		t.Run(string(choice), func(t *testing.T) {
+			t.Parallel()
+
+			server, calls := newAnthropicJSONServer(mockAnthropicGenerateResponse())
+			defer server.Close()
+
+			provider, err := New(WithAPIKey("test-api-key"), WithBaseURL(server.URL))
+			require.NoError(t, err)
+
+			model, err := provider.LanguageModel(context.Background(), "claude-opus-5-5")
+			require.NoError(t, err)
+
+			toolChoice := choice
+			resp, err := model.Generate(context.Background(), fantasy.Call{
+				Prompt:     testPrompt(),
+				Tools:      []fantasy.Tool{fantasy.FunctionTool{Name: "test"}},
+				ToolChoice: &toolChoice,
+			})
+			require.NoError(t, err)
+			require.Len(t, resp.Warnings, 1)
+			require.Equal(t, "toolChoice", resp.Warnings[0].Setting)
+
+			call := awaitAnthropicCall(t, calls)
+			got, ok := call.body["tool_choice"].(map[string]any)
+			require.True(t, ok, "request body should have tool_choice")
+			require.Equal(t, "auto", got["type"])
+		})
+	}
+}
+
 // --- Computer Use Tests ---
 
 // jsonRoundTripTool simulates a JSON round-trip on a
@@ -3348,4 +3411,41 @@ func TestDisplayDefaultDoesNotChangeThinkingMode(t *testing.T) {
 	require.False(t, requiresAdaptiveThinking("claude-sonnet-5"))
 	require.True(t, requiresAdaptiveThinking("claude-opus-4-7"))
 	require.True(t, requiresAdaptiveThinking("claude-mythos-preview"))
+	require.True(t, requiresAdaptiveThinking("claude-opus-5-5"))
+	require.True(t, requiresAdaptiveThinking("us.anthropic.claude-opus-5-5"))
+}
+
+// Adaptive-only models reject non-default sampling parameters outright, so
+// they must be stripped (with warnings) even when no thinking option is set.
+func TestAdaptiveOnlyModelsStripSamplingParams(t *testing.T) {
+	t.Parallel()
+
+	server, calls := newAnthropicJSONServer(mockAnthropicGenerateResponse())
+	defer server.Close()
+
+	provider, err := New(WithAPIKey("test-api-key"), WithBaseURL(server.URL))
+	require.NoError(t, err)
+
+	model, err := provider.LanguageModel(context.Background(), "claude-opus-5-5")
+	require.NoError(t, err)
+
+	temperature := 0.2
+	topP := 0.9
+	topK := int64(40)
+	resp, err := model.Generate(context.Background(), fantasy.Call{
+		Prompt:      testPrompt(),
+		Temperature: &temperature,
+		TopP:        &topP,
+		TopK:        &topK,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Warnings, 3)
+
+	call := awaitAnthropicCall(t, calls)
+	require.NotContains(t, call.body, "temperature")
+	require.NotContains(t, call.body, "top_p")
+	require.NotContains(t, call.body, "top_k")
+	thinking, ok := call.body["thinking"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "adaptive", thinking["type"])
 }
