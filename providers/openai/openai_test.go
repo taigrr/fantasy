@@ -1290,6 +1290,102 @@ func TestDoGenerate(t *testing.T) {
 		require.Equal(t, `{"value":"Spark"}`, toolCall.Input)
 	})
 
+	t.Run("should preserve finish_reason length when tool calls are present", func(t *testing.T) {
+		t.Parallel()
+
+		server := newMockServer()
+		defer server.close()
+
+		server.prepareJSONResponse(map[string]any{
+			"finish_reason": "length",
+			"tool_calls": []map[string]any{
+				{
+					"id":   "call_truncated",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "test-tool",
+						"arguments": `{"value":"trunc`,
+					},
+				},
+			},
+		})
+
+		provider, err := New(
+			WithAPIKey("test-api-key"),
+			WithBaseURL(server.server.URL),
+		)
+		require.NoError(t, err)
+		model, _ := provider.LanguageModel(t.Context(), "gpt-3.5-turbo")
+
+		result, err := model.Generate(context.Background(), fantasy.Call{
+			Prompt: testPrompt,
+			Tools: []fantasy.Tool{
+				fantasy.FunctionTool{
+					Name: "test-tool",
+					InputSchema: map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"value": map[string]any{"type": "string"}},
+					},
+				},
+			},
+		})
+
+		require.NoError(t, err)
+		require.Equal(t, fantasy.FinishReasonLength, result.FinishReason)
+		require.NotEmpty(t, result.Warnings)
+		require.Contains(t, result.Warnings[0].Message, "token limit")
+		// Truncated tool calls must not appear in content so agents
+		// don't dispatch them with incomplete arguments.
+		for _, c := range result.Content {
+			require.NotEqual(t, fantasy.ContentTypeToolCall, c.GetType(), "truncated tool call should be suppressed")
+		}
+	})
+
+	t.Run("should override to tool_calls when finish_reason is stop", func(t *testing.T) {
+		t.Parallel()
+
+		server := newMockServer()
+		defer server.close()
+
+		server.prepareJSONResponse(map[string]any{
+			"finish_reason": "stop",
+			"tool_calls": []map[string]any{
+				{
+					"id":   "call_ok",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "test-tool",
+						"arguments": `{"value":"ok"}`,
+					},
+				},
+			},
+		})
+
+		provider, err := New(
+			WithAPIKey("test-api-key"),
+			WithBaseURL(server.server.URL),
+		)
+		require.NoError(t, err)
+		model, _ := provider.LanguageModel(t.Context(), "gpt-3.5-turbo")
+
+		result, err := model.Generate(context.Background(), fantasy.Call{
+			Prompt: testPrompt,
+			Tools: []fantasy.Tool{
+				fantasy.FunctionTool{
+					Name: "test-tool",
+					InputSchema: map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"value": map[string]any{"type": "string"}},
+					},
+				},
+			},
+		})
+
+		require.NoError(t, err)
+		require.Equal(t, fantasy.FinishReasonToolCalls, result.FinishReason)
+		require.Empty(t, result.Warnings)
+	})
+
 	t.Run("should handle ToolChoiceRequired", func(t *testing.T) {
 		t.Parallel()
 
@@ -2260,6 +2356,17 @@ func (sms *streamingMockServer) prepareStreamResponse(opts map[string]any) {
 	sms.chunks = chunks
 }
 
+// chatCompletionChunksBeforeFinishReason drops every chunk from the final
+// finish_reason chunk onward, including any trailing usage-only chunk.
+func chatCompletionChunksBeforeFinishReason(chunks []string) []string {
+	for i, chunk := range chunks {
+		if strings.Contains(chunk, `"finish_reason":"`) {
+			return append([]string(nil), chunks[:i]...)
+		}
+	}
+	return append([]string(nil), chunks...)
+}
+
 func (sms *streamingMockServer) prepareToolStreamResponse() {
 	chunks := []string{
 		`data: {"id":"chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_O17Uplv4lJvD6DVdIvFFeRMw","type":"function","function":{"name":"test-tool","arguments":""}}]},"logprobs":null,"finish_reason":null}]}` + "\n\n",
@@ -2272,6 +2379,47 @@ func (sms *streamingMockServer) prepareToolStreamResponse() {
 		`data: {"id":"chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]},"logprobs":null,"finish_reason":null}]}` + "\n\n",
 		`data: {"id":"chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"tool_calls"}]}` + "\n\n",
 		`data: {"id":"chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[],"usage":{"prompt_tokens":53,"completion_tokens":17,"total_tokens":70}}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	sms.chunks = chunks
+}
+
+// prepareParallelToolStreamResponse streams two tool calls (index 0 and
+// index 1) the way OpenAI-compatible providers do: each call's fragments
+// arrive sequentially by index, and finish_reason only comes at the end.
+func (sms *streamingMockServer) prepareParallelToolStreamResponse() {
+	chunk := func(body string) string {
+		return `data: {"id":"chatcmpl-parallel","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","choices":[{"index":0,"delta":` + body + `,"finish_reason":null}]}` + "\n\n"
+	}
+	chunks := []string{
+		// Tool call 0 (get_weather)
+		chunk(`{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":""}}]}`),
+		chunk(`{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}`),
+		chunk(`{"tool_calls":[{"index":0,"function":{"arguments":"\"NYC\"}"}}]}`),
+		// Tool call 1 (get_time) — appearance of index 1 closes call 0
+		chunk(`{"tool_calls":[{"index":1,"id":"call_time","type":"function","function":{"name":"get_time","arguments":""}}]}`),
+		chunk(`{"tool_calls":[{"index":1,"function":{"arguments":"{\"tz\":"}}]}`),
+		chunk(`{"tool_calls":[{"index":1,"function":{"arguments":"\"EST\"}"}}]}`),
+		`data: {"id":"chatcmpl-parallel","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n",
+		`data: {"id":"chatcmpl-parallel","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","choices":[],"usage":{"prompt_tokens":53,"completion_tokens":17,"total_tokens":70}}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	sms.chunks = chunks
+}
+
+func (sms *streamingMockServer) prepareMixedContentAndToolStreamResponse() {
+	chunks := []string{
+		// Chunk with both content and tool_calls in the same delta
+		`data: {"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{"role":"assistant","content":"thinking before tool","tool_calls":[{"index":0,"id":"call_mixed","type":"function","function":{"name":"test-tool","arguments":""}}]},"logprobs":null,"finish_reason":null}]}` + "\n\n",
+		// Tool call argument deltas
+		`data: {"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\""}}]},"logprobs":null,"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"value"}}]},"logprobs":null,"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\":\""}}]},"logprobs":null,"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"hello"}}]},"logprobs":null,"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]},"logprobs":null,"finish_reason":null}]}` + "\n\n",
+		// Finish
+		`data: {"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"tool_calls"}]}` + "\n\n",
+		`data: {"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":1711357598,"model":"gpt-3.5-turbo-0125","system_fingerprint":"fp_3bc1b5746c","choices":[],"usage":{"prompt_tokens":53,"completion_tokens":17,"total_tokens":70}}` + "\n\n",
 		"data: [DONE]\n\n",
 	}
 	sms.chunks = chunks
@@ -2326,6 +2474,90 @@ func collectStreamParts(stream fantasy.StreamResponse) ([]fantasy.StreamPart, er
 		}
 	}
 	return parts, nil
+}
+
+func TestChatCompletionsStreamObject_RequiresFinishReasonBeforeFinish(t *testing.T) {
+	t.Parallel()
+
+	objectSchema := fantasy.Schema{
+		Type: "object",
+		Properties: map[string]*fantasy.Schema{
+			"answer": {Type: "string"},
+		},
+		Required: []string{"answer"},
+	}
+
+	tests := []struct {
+		name       string
+		truncate   bool
+		wantFinish bool
+	}{
+		{
+			name:       "complete stream finishes",
+			wantFinish: true,
+		},
+		{
+			name:     "stream closed before finish_reason errors",
+			truncate: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := newStreamingMockServer()
+			defer server.close()
+
+			server.prepareStreamResponse(map[string]any{
+				"content": []string{`{"answer":"hello"}`},
+			})
+			if tt.truncate {
+				server.chunks = chatCompletionChunksBeforeFinishReason(server.chunks)
+			}
+
+			provider, err := New(
+				WithAPIKey("test-api-key"),
+				WithBaseURL(server.server.URL),
+			)
+			require.NoError(t, err)
+			model, _ := provider.LanguageModel(t.Context(), "gpt-3.5-turbo")
+
+			stream, err := model.StreamObject(context.Background(), fantasy.ObjectCall{
+				Prompt: testPrompt,
+				Schema: objectSchema,
+			})
+			require.NoError(t, err)
+
+			parts := collectObjectStreamParts(stream)
+
+			var objects, finishes, errorParts []fantasy.ObjectStreamPart
+			for _, part := range parts {
+				switch part.Type {
+				case fantasy.ObjectStreamPartTypeObject:
+					objects = append(objects, part)
+				case fantasy.ObjectStreamPartTypeFinish:
+					finishes = append(finishes, part)
+				case fantasy.ObjectStreamPartTypeError:
+					errorParts = append(errorParts, part)
+				}
+			}
+
+			require.NotEmpty(t, objects)
+			require.Equal(t, map[string]any{"answer": "hello"}, objects[len(objects)-1].Object)
+
+			if tt.wantFinish {
+				require.Len(t, finishes, 1)
+				require.Empty(t, errorParts)
+				return
+			}
+
+			require.Empty(t, finishes)
+			require.Len(t, errorParts, 1)
+			require.Error(t, errorParts[0].Error)
+			requireRetryableUnexpectedEOF(t, errorParts[0].Error)
+		})
+	}
 }
 
 func TestDoStream(t *testing.T) {
@@ -2469,6 +2701,139 @@ func TestDoStream(t *testing.T) {
 			fullInput.WriteString(delta)
 		}
 		require.Equal(t, `{"value":"Sparkle Day"}`, fullInput.String())
+	})
+
+	t.Run("should frame parallel tool calls during streaming", func(t *testing.T) {
+		t.Parallel()
+
+		server := newStreamingMockServer()
+		defer server.close()
+
+		server.prepareParallelToolStreamResponse()
+
+		provider, err := New(
+			WithAPIKey("test-api-key"),
+			WithBaseURL(server.server.URL),
+		)
+		require.NoError(t, err)
+		model, _ := provider.LanguageModel(t.Context(), "gpt-3.5-turbo")
+
+		stream, err := model.Stream(context.Background(), fantasy.Call{
+			Prompt: testPrompt,
+			Tools: []fantasy.Tool{
+				fantasy.FunctionTool{Name: "get_weather"},
+				fantasy.FunctionTool{Name: "get_time"},
+			},
+		})
+		require.NoError(t, err)
+
+		parts, err := collectStreamParts(stream)
+		require.NoError(t, err)
+
+		// The integrity contract: every opened call is attributed deltas for
+		// its own id only, every call is ended exactly once, and every
+		// ToolCall carries the fully accumulated input. Interleaved
+		// providers may keep sending deltas for an earlier call after the
+		// next one has started, so an end is not required to precede the
+		// next start — but no delta may arrive after its call's end.
+		started := map[string]bool{}
+		ended := map[string]bool{}
+		argsByID := map[string]*strings.Builder{}
+		nameByID := map[string]string{}
+		var order []string
+
+		for _, part := range parts {
+			switch part.Type {
+			case fantasy.StreamPartTypeToolInputStart:
+				require.False(t, started[part.ID], "duplicate start for %s", part.ID)
+				started[part.ID] = true
+				nameByID[part.ID] = part.ToolCallName
+				argsByID[part.ID] = &strings.Builder{}
+				order = append(order, part.ID)
+			case fantasy.StreamPartTypeToolInputDelta:
+				require.True(t, started[part.ID], "delta for never-started call %s", part.ID)
+				require.False(t, ended[part.ID], "delta after end for %s", part.ID)
+				argsByID[part.ID].WriteString(part.Delta)
+			case fantasy.StreamPartTypeToolInputEnd:
+				require.True(t, started[part.ID], "end for never-started call %s", part.ID)
+				require.False(t, ended[part.ID], "duplicate end for %s", part.ID)
+				ended[part.ID] = true
+			case fantasy.StreamPartTypeToolCall:
+				require.True(t, ended[part.ID], "tool call %s finalized before end", part.ID)
+				nameByID[part.ID] = part.ToolCallName
+				argsByID[part.ID].Reset()
+				argsByID[part.ID].WriteString(part.ToolCallInput)
+			}
+		}
+
+		require.Equal(t, []string{"call_weather", "call_time"}, order,
+			"expected two distinct calls framed in order")
+		require.Equal(t, "get_weather", nameByID["call_weather"])
+		require.JSONEq(t, `{"city":"NYC"}`, argsByID["call_weather"].String())
+		require.Equal(t, "get_time", nameByID["call_time"])
+		require.JSONEq(t, `{"tz":"EST"}`, argsByID["call_time"].String())
+	})
+
+	t.Run("should handle mixed content and tool calls in same chunk", func(t *testing.T) {
+		t.Parallel()
+
+		server := newStreamingMockServer()
+		defer server.close()
+
+		server.prepareMixedContentAndToolStreamResponse()
+
+		provider, err := New(
+			WithAPIKey("test-api-key"),
+			WithBaseURL(server.server.URL),
+		)
+		require.NoError(t, err)
+		model, _ := provider.LanguageModel(t.Context(), "gpt-3.5-turbo")
+
+		stream, err := model.Stream(context.Background(), fantasy.Call{
+			Prompt: testPrompt,
+			Tools: []fantasy.Tool{
+				fantasy.FunctionTool{
+					Name: "test-tool",
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"value": map[string]any{
+								"type": "string",
+							},
+						},
+						"required":             []string{"value"},
+						"additionalProperties": false,
+						"$schema":              "http://json-schema.org/draft-07/schema#",
+					},
+				},
+			},
+		})
+
+		require.NoError(t, err)
+
+		parts, err := collectStreamParts(stream)
+		require.NoError(t, err)
+
+		// Verify both text and tool call parts are present
+		hasTextDelta := false
+		toolCall := -1
+
+		for i, part := range parts {
+			switch part.Type {
+			case fantasy.StreamPartTypeTextDelta:
+				if part.Delta == "thinking before tool" {
+					hasTextDelta = true
+				}
+			case fantasy.StreamPartTypeToolCall:
+				toolCall = i
+				require.Equal(t, "call_mixed", part.ID)
+				require.Equal(t, "test-tool", part.ToolCallName)
+				require.Equal(t, `{"value":"hello"}`, part.ToolCallInput)
+			}
+		}
+
+		require.True(t, hasTextDelta, "expected text delta from mixed chunk")
+		require.NotEqual(t, -1, toolCall, "expected tool call from mixed chunk")
 	})
 
 	t.Run("should handle tool calls with empty arguments", func(t *testing.T) {
@@ -3213,6 +3578,61 @@ func TestDoStream(t *testing.T) {
 		require.NotNil(t, finish)
 		require.Equal(t, fantasy.FinishReasonToolCalls, finish.FinishReason)
 	})
+
+	t.Run("should preserve finish_reason length with tool calls during streaming", func(t *testing.T) {
+		t.Parallel()
+
+		server := newStreamingMockServer()
+		defer server.close()
+
+		server.chunks = []string{
+			`data: {"id":"chatcmpl-truncated","object":"chat.completion.chunk","created":1,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_trunc","type":"function","function":{"name":"test-tool","arguments":""}}]},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl-truncated","object":"chat.completion.chunk","created":1,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"val"}}]},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl-truncated","object":"chat.completion.chunk","created":1,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}` + "\n\n",
+			"data: [DONE]\n\n",
+		}
+
+		provider, err := New(
+			WithAPIKey("test-api-key"),
+			WithBaseURL(server.server.URL),
+		)
+		require.NoError(t, err)
+		model, _ := provider.LanguageModel(t.Context(), "gpt-3.5-turbo")
+
+		stream, err := model.Stream(context.Background(), fantasy.Call{
+			Prompt: testPrompt,
+			Tools: []fantasy.Tool{fantasy.FunctionTool{
+				Name: "test-tool",
+				InputSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"val": map[string]any{"type": "string"}},
+				},
+			}},
+		})
+		require.NoError(t, err)
+
+		parts, err := collectStreamParts(stream)
+		require.NoError(t, err)
+
+		var finish *fantasy.StreamPart
+		var hasWarning bool
+		var toolCallCount int
+		for i, part := range parts {
+			if part.Type == fantasy.StreamPartTypeFinish {
+				finish = &parts[i]
+			}
+			if part.Type == fantasy.StreamPartTypeWarnings {
+				hasWarning = true
+			}
+			if part.Type == fantasy.StreamPartTypeToolCall {
+				toolCallCount++
+			}
+		}
+		require.NotNil(t, finish)
+		require.Equal(t, fantasy.FinishReasonLength, finish.FinishReason)
+		require.True(t, hasWarning, "expected truncation warning")
+		require.Zero(t, toolCallCount, "truncated tool calls must not be emitted")
+	})
 }
 
 func TestDefaultToPrompt_DropsEmptyMessages(t *testing.T) {
@@ -3570,6 +3990,40 @@ func TestParseContextTooLargeError(t *testing.T) {
 			wantMax:  8192,
 		},
 		{
+			name:     "matches ionet format with of and tilde",
+			message:  "Your request exceeds this model's maximum context length of 204800 tokens. You requested ~269722 tokens (204186 input + 65536 output). Reduce your prompt length or max_tokens and retry.",
+			wantErr:  true,
+			wantUsed: 269722,
+			wantMax:  204800,
+		},
+		{
+			name:    "matches alibaba/qwen format",
+			message: "<400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 245760]",
+			wantErr: true,
+			wantMax: 245760,
+		},
+		{
+			name:     "matches baseten format",
+			message:  "Input length 265059 exceeds the maximum allowed input length of 262112 tokens.",
+			wantErr:  true,
+			wantUsed: 265059,
+			wantMax:  262112,
+		},
+		{
+			name:     "matches fireworks format",
+			message:  "The prompt is too long: 1261484, model maximum context length: 1048573",
+			wantErr:  true,
+			wantUsed: 1261484,
+			wantMax:  1048573,
+		},
+		{
+			name:     "matches vercel format",
+			message:  "Input too long: 518063 input tokens, limit is 262144 for this model",
+			wantErr:  true,
+			wantUsed: 518063,
+			wantMax:  262144,
+		},
+		{
 			name:    "does not match unrelated error",
 			message: "invalid api key",
 			wantErr: false,
@@ -3883,7 +4337,8 @@ func TestResponsesGenerate_WebSearchResponse(t *testing.T) {
 
 	// TextContent with the final answer.
 	require.Len(t, texts, 1)
-	require.Equal(t,
+	require.Equal(
+		t,
 		"Based on recent search results, here is the latest AI news.",
 		texts[0].Text,
 	)
@@ -4265,6 +4720,249 @@ func TestResponsesToPrompt_ReasoningWithStore(t *testing.T) {
 	})
 }
 
+func TestResponsesStream_RequiresTerminalEventBeforeFinish(t *testing.T) {
+	t.Parallel()
+
+	textChunks := []string{
+		responsesSSEEvent("response.created", `{"type":"response.created","response":{"id":"resp_01","status":"in_progress","output":[]}}`),
+		responsesSSEEvent("response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_01","type":"message","role":"assistant","status":"in_progress","content":[]}}`),
+		responsesSSEEvent("response.content_part.added", `{"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"msg_01","part":{"type":"output_text","text":""}}`),
+		responsesSSEEvent("response.output_text.delta", `{"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_01","delta":"hello"}`),
+	}
+	incompleteEvent := responsesSSEEvent("response.incomplete", `{"type":"response.incomplete","response":{"id":"resp_02","status":"incomplete","output":[],"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+	failedEvent := responsesSSEEvent("response.failed", `{"type":"response.failed","response":{"id":"resp_03","status":"failed","error":{"code":"server_error","message":"boom"},"output":[]}}`)
+	errorEvent := responsesSSEEvent("error", `{"type":"error","message":"stream down","code":"server_error","param":"","sequence_number":1}`)
+
+	tests := []struct {
+		name             string
+		chunks           []string
+		wantFinish       bool
+		wantFinishReason fantasy.FinishReason
+		wantRetryable    bool
+		wantErrContain   string
+	}{
+		{
+			name:             "incomplete terminal event finishes",
+			chunks:           append(append([]string{}, textChunks...), incompleteEvent),
+			wantFinish:       true,
+			wantFinishReason: fantasy.FinishReasonLength,
+		},
+		{
+			name:          "stream closed before terminal event errors",
+			chunks:        textChunks,
+			wantRetryable: true,
+		},
+		{
+			name:           "response failed errors",
+			chunks:         []string{failedEvent},
+			wantErrContain: "response failed: boom (code: server_error)",
+		},
+		{
+			name:           "provider error event is preserved",
+			chunks:         []string{errorEvent},
+			wantErrContain: "response error: stream down (code: server_error)",
+		},
+		{
+			name:           "malformed event error is preserved",
+			chunks:         []string{responsesSSEEvent("response.created", `{`)},
+			wantErrContain: "unexpected end of JSON input",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			sms := newStreamingMockServer()
+			defer sms.close()
+			sms.chunks = tt.chunks
+
+			model := newResponsesProvider(t, sms.server.URL)
+			stream, err := model.Stream(context.Background(), fantasy.Call{Prompt: testPrompt})
+			require.NoError(t, err)
+
+			parts, err := collectStreamParts(stream)
+			require.NoError(t, err)
+
+			var finishes, errorParts []fantasy.StreamPart
+			for _, part := range parts {
+				switch part.Type {
+				case fantasy.StreamPartTypeFinish:
+					finishes = append(finishes, part)
+				case fantasy.StreamPartTypeError:
+					errorParts = append(errorParts, part)
+				}
+			}
+
+			if tt.wantFinish {
+				require.Len(t, finishes, 1)
+				require.Empty(t, errorParts)
+				require.Equal(t, tt.wantFinishReason, finishes[0].FinishReason)
+				return
+			}
+
+			require.Empty(t, finishes)
+			require.Len(t, errorParts, 1)
+			require.Error(t, errorParts[0].Error)
+			if tt.wantErrContain != "" {
+				require.Contains(t, errorParts[0].Error.Error(), tt.wantErrContain)
+			}
+
+			if tt.wantRetryable {
+				requireRetryableUnexpectedEOF(t, errorParts[0].Error)
+			} else {
+				requireNotRetryableUnexpectedEOF(t, errorParts[0].Error)
+			}
+		})
+	}
+}
+
+func TestResponsesStreamObject_RequiresTerminalEventBeforeFinish(t *testing.T) {
+	t.Parallel()
+
+	objectSchema := fantasy.Schema{
+		Type: "object",
+		Properties: map[string]*fantasy.Schema{
+			"answer": {Type: "string"},
+		},
+		Required: []string{"answer"},
+	}
+
+	objectChunks := []string{
+		responsesSSEEvent("response.created", `{"type":"response.created","response":{"id":"resp_obj","status":"in_progress","output":[]}}`),
+		responsesSSEEvent("response.output_text.delta", `{"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_obj","delta":"{\"answer\":\"hello\"}"}`),
+	}
+	completedEvent := responsesSSEEvent("response.completed", `{"type":"response.completed","response":{"id":"resp_obj","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+	failedEvent := responsesSSEEvent("response.failed", `{"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"code":"server_error","message":"boom"},"output":[]}}`)
+	errorEvent := responsesSSEEvent("error", `{"type":"error","message":"stream down","code":"server_error","param":"","sequence_number":1}`)
+
+	tests := []struct {
+		name           string
+		chunks         []string
+		wantFinish     bool
+		wantObject     bool
+		wantRetryable  bool
+		wantErrContain string
+	}{
+		{
+			name:       "completed terminal event finishes",
+			chunks:     append(append([]string{}, objectChunks...), completedEvent),
+			wantFinish: true,
+			wantObject: true,
+		},
+		{
+			name:          "object stream closed before terminal event errors",
+			chunks:        objectChunks,
+			wantObject:    true,
+			wantRetryable: true,
+		},
+		{
+			name:           "response failed errors",
+			chunks:         []string{failedEvent},
+			wantErrContain: "response failed: boom (code: server_error)",
+		},
+		{
+			name:           "provider error event is preserved",
+			chunks:         []string{errorEvent},
+			wantErrContain: "response error: stream down (code: server_error)",
+		},
+		{
+			name:           "malformed event error is preserved",
+			chunks:         []string{responsesSSEEvent("response.output_text.delta", `{`)},
+			wantErrContain: "unexpected end of JSON input",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			sms := newStreamingMockServer()
+			defer sms.close()
+			sms.chunks = tt.chunks
+
+			model := newResponsesProvider(t, sms.server.URL)
+			stream, err := model.StreamObject(context.Background(), fantasy.ObjectCall{
+				Prompt: testPrompt,
+				Schema: objectSchema,
+			})
+			require.NoError(t, err)
+
+			parts := collectObjectStreamParts(stream)
+
+			var objects, finishes, errorParts []fantasy.ObjectStreamPart
+			for _, part := range parts {
+				switch part.Type {
+				case fantasy.ObjectStreamPartTypeObject:
+					objects = append(objects, part)
+				case fantasy.ObjectStreamPartTypeFinish:
+					finishes = append(finishes, part)
+				case fantasy.ObjectStreamPartTypeError:
+					errorParts = append(errorParts, part)
+				}
+			}
+
+			if tt.wantObject {
+				require.NotEmpty(t, objects)
+				require.Equal(t, map[string]any{"answer": "hello"}, objects[len(objects)-1].Object)
+			} else {
+				require.Empty(t, objects)
+			}
+
+			if tt.wantFinish {
+				require.Len(t, finishes, 1)
+				require.Empty(t, errorParts)
+				return
+			}
+
+			require.Empty(t, finishes)
+			require.Len(t, errorParts, 1)
+			require.Error(t, errorParts[0].Error)
+			if tt.wantErrContain != "" {
+				require.Contains(t, errorParts[0].Error.Error(), tt.wantErrContain)
+			}
+
+			if tt.wantRetryable {
+				requireRetryableUnexpectedEOF(t, errorParts[0].Error)
+			} else {
+				requireNotRetryableUnexpectedEOF(t, errorParts[0].Error)
+			}
+		})
+	}
+}
+
+func responsesSSEEvent(event, data string) string {
+	return "event: " + event + "\n" + "data: " + data + "\n\n"
+}
+
+func collectObjectStreamParts(stream fantasy.ObjectStreamResponse) []fantasy.ObjectStreamPart {
+	var parts []fantasy.ObjectStreamPart
+	for part := range stream {
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+func requireNotRetryableUnexpectedEOF(t *testing.T, err error) {
+	t.Helper()
+
+	require.NotErrorIs(t, err, io.ErrUnexpectedEOF)
+	var providerErr *fantasy.ProviderError
+	if errors.As(err, &providerErr) {
+		require.False(t, providerErr.IsRetryable())
+		require.NotErrorIs(t, providerErr.Cause, io.ErrUnexpectedEOF)
+	}
+}
+
+func requireRetryableUnexpectedEOF(t *testing.T, err error) {
+	t.Helper()
+
+	var providerErr *fantasy.ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	require.True(t, providerErr.IsRetryable())
+	require.ErrorIs(t, providerErr.Cause, io.ErrUnexpectedEOF)
+}
+
 func TestResponsesStream_WebSearchResponse(t *testing.T) {
 	t.Parallel()
 
@@ -4472,4 +5170,103 @@ func TestResponsesStream_TruncatedWithoutResponseCompleted(t *testing.T) {
 	require.ErrorAs(t, errPart.Error, &providerErr)
 	require.True(t, providerErr.IsRetryable())
 	require.ErrorIs(t, providerErr.Cause, io.ErrUnexpectedEOF)
+}
+
+func TestResponsesGenerate_TruncatedToolCalls(t *testing.T) {
+	t.Parallel()
+
+	server := newMockServer()
+	defer server.close()
+	server.response = map[string]any{
+		"id":     "resp_trunc",
+		"object": "response",
+		"model":  "gpt-4.1",
+		"output": []any{
+			map[string]any{
+				"type":      "function_call",
+				"id":        "fc_trunc",
+				"call_id":   "call_trunc",
+				"name":      "test-tool",
+				"arguments": `{"value":"trunc`,
+				"status":    "completed",
+			},
+		},
+		"status":             "incomplete",
+		"incomplete_details": map[string]any{"reason": "max_output_tokens"},
+		"usage": map[string]any{
+			"input_tokens":  10,
+			"output_tokens": 20,
+			"total_tokens":  30,
+		},
+	}
+
+	model := newResponsesProvider(t, server.server.URL)
+
+	resp, err := model.Generate(context.Background(), fantasy.Call{
+		Prompt: testPrompt,
+		Tools: []fantasy.Tool{fantasy.FunctionTool{
+			Name: "test-tool",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"value": map[string]any{"type": "string"}},
+			},
+		}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, fantasy.FinishReasonLength, resp.FinishReason)
+	require.NotEmpty(t, resp.Warnings)
+	require.Contains(t, resp.Warnings[0].Message, "token limit")
+	for _, c := range resp.Content {
+		require.NotEqual(t, fantasy.ContentTypeToolCall, c.GetType(), "truncated tool call should be suppressed")
+	}
+}
+
+func TestResponsesStream_TruncatedToolCalls(t *testing.T) {
+	t.Parallel()
+
+	chunks := []string{
+		responsesSSEEvent("response.created", `{"type":"response.created","response":{"id":"resp_trunc","status":"in_progress","output":[]}}`),
+		responsesSSEEvent("response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_trunc","call_id":"call_trunc","name":"test-tool","status":"in_progress","arguments":""}}`),
+		responsesSSEEvent("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"value\":\"tr"}`),
+		responsesSSEEvent("response.output_item.done", `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_trunc","call_id":"call_trunc","name":"test-tool","status":"completed","arguments":"{\"value\":\"tr"}}`),
+		responsesSSEEvent("response.incomplete", `{"type":"response.incomplete","response":{"id":"resp_trunc","status":"incomplete","output":[],"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}`),
+	}
+
+	sms := newStreamingMockServer()
+	defer sms.close()
+	sms.chunks = chunks
+
+	model := newResponsesProvider(t, sms.server.URL)
+
+	stream, err := model.Stream(context.Background(), fantasy.Call{
+		Prompt: testPrompt,
+		Tools: []fantasy.Tool{fantasy.FunctionTool{
+			Name: "test-tool",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"val": map[string]any{"type": "string"}},
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	var parts []fantasy.StreamPart
+	stream(func(part fantasy.StreamPart) bool {
+		parts = append(parts, part)
+		return true
+	})
+
+	var finish *fantasy.StreamPart
+	var hasWarning bool
+	for i, part := range parts {
+		if part.Type == fantasy.StreamPartTypeFinish {
+			finish = &parts[i]
+		}
+		if part.Type == fantasy.StreamPartTypeWarnings {
+			hasWarning = true
+		}
+	}
+	require.NotNil(t, finish)
+	require.Equal(t, fantasy.FinishReasonLength, finish.FinishReason)
+	require.True(t, hasWarning, "expected truncation warning")
 }

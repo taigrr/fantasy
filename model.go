@@ -18,7 +18,8 @@ type Usage struct {
 }
 
 func (u Usage) String() string {
-	return fmt.Sprintf("Usage{Input: %d, Output: %d, Total: %d, Reasoning: %d, CacheCreation: %d, CacheRead: %d}",
+	return fmt.Sprintf(
+		"Usage{Input: %d, Output: %d, Total: %d, Reasoning: %d, CacheCreation: %d, CacheRead: %d}",
 		u.InputTokens,
 		u.OutputTokens,
 		u.TotalTokens,
@@ -31,7 +32,7 @@ func (u Usage) String() string {
 // ResponseContent represents the content of a model response.
 type ResponseContent []Content
 
-// Text returns the text content of the response.
+// Text returns the first text content of the response.
 func (r ResponseContent) Text() string {
 	for _, c := range r {
 		if c.GetType() == ContentTypeText {
@@ -163,6 +164,10 @@ const (
 	StreamPartTypeFinish StreamPartType = "finish"
 	// StreamPartTypeError represents error stream part type.
 	StreamPartTypeError StreamPartType = "error"
+	// StreamPartTypeKeepalive represents a provider event that carries no
+	// content and only shows the stream is still alive. Consumers reading
+	// content can ignore it; an idle-timeout watchdog should not.
+	StreamPartTypeKeepalive StreamPartType = "keepalive"
 )
 
 // StreamPart represents a part of a streaming response.
@@ -220,6 +225,9 @@ type Call struct {
 
 	// UserAgent overrides the provider-level User-Agent header for this call.
 	UserAgent string `json:"-"`
+
+	// Headers overrides matching provider-level headers for this call.
+	Headers map[string]string `json:"-"`
 
 	// for provider specific options, the key is the provider id
 	ProviderOptions ProviderOptions `json:"provider_options"`

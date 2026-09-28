@@ -8,10 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/charmbracelet/x/exp/slice"
+	"github.com/taigrr/fantasy/jsonrepair"
 	"github.com/taigrr/fantasy/schema"
 )
 
@@ -170,9 +173,17 @@ type AgentCall struct {
 	FrequencyPenalty *float64    `json:"frequency_penalty"`
 	ActiveTools      []string    `json:"active_tools"`
 	ToolChoice       *ToolChoice `json:"tool_choice"`
+	Headers          map[string]string
 	ProviderOptions  ProviderOptions
 	OnRetry          OnRetryCallback
+	OnAuthRefresh    OnAuthRefreshFunc
 	MaxRetries       *int
+
+	// ModelProvider, when non-nil, is called on each retry attempt to
+	// obtain the language model. This allows callers to swap in a
+	// refreshed model after OnAuthRefresh rebuilds credentials. When
+	// nil, the model captured at step preparation time is used.
+	ModelProvider func() LanguageModel
 
 	StopWhen       []StopCondition
 	PrepareStep    PrepareStepFunction
@@ -198,6 +209,16 @@ type (
 
 	// OnErrorFunc is called when an error occurs.
 	OnErrorFunc func(error)
+
+	// OnAuthRefreshFunc is called when a stream fails with an authentication
+	// error that the caller may be able to resolve (e.g. an expired SSO
+	// session or OAuth token). The function should perform whatever credential
+	// refresh is needed and return nil on success, in which case fantasy
+	// retries the operation transparently. Returning an error surfaces the
+	// original auth error to the caller without retry. Pair this with
+	// ModelProvider to supply a rebuilt model carrying the refreshed
+	// credentials on the retry attempt.
+	OnAuthRefreshFunc func(ctx context.Context, err *ProviderError) error
 )
 
 // Stream part callbacks - called for each corresponding stream part type.
@@ -264,7 +285,14 @@ type AgentStreamCall struct {
 	Headers          map[string]string
 	ProviderOptions  ProviderOptions
 	OnRetry          OnRetryCallback
+	OnAuthRefresh    OnAuthRefreshFunc
 	MaxRetries       *int
+
+	// ModelProvider, when non-nil, is called on each retry attempt to
+	// obtain the language model. This allows callers to swap in a
+	// refreshed model after OnAuthRefresh rebuilds credentials. When
+	// nil, the model captured at step preparation time is used.
+	ModelProvider func() LanguageModel
 
 	StopWhen       []StopCondition
 	PrepareStep    PrepareStepFunction
@@ -299,9 +327,42 @@ type AgentStreamCall struct {
 // AgentResult represents the result of an agent execution.
 type AgentResult struct {
 	Steps []StepResult
-	// Final response
+	// Final response. When the last step is tool-only (no text content),
+	// this is the response from the most recent step that contained text,
+	// so callers always see meaningful output without walking Steps manually.
 	Response   Response
 	TotalUsage Usage
+}
+
+// finalResponse picks the best Response from a slice of steps. It walks
+// backwards to find the most recent step with non-blank text content. If no
+// step has text content (e.g. all steps were tool calls), the last step's
+// response is returned as-is.
+func finalResponse(steps []StepResult) Response {
+	for i := len(steps) - 1; i >= 0; i-- {
+		if hasNonBlankText(steps[i].Content) {
+			return steps[i].Response
+		}
+	}
+	if len(steps) > 0 {
+		return steps[len(steps)-1].Response
+	}
+	return Response{}
+}
+
+// hasNonBlankText reports whether content contains at least one text block
+// with non-whitespace characters.
+func hasNonBlankText(content ResponseContent) bool {
+	for _, c := range content {
+		if c.GetType() == ContentTypeText {
+			if tc, ok := AsContentType[TextContent](c); ok {
+				if strings.TrimSpace(tc.Text) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Agent represents an AI agent that can generate responses and stream responses.
@@ -367,6 +428,10 @@ func (a *agent) prepareCall(call AgentCall) AgentCall {
 	if a.settings.headers != nil {
 		maps.Copy(headers, a.settings.headers)
 	}
+	if call.Headers != nil {
+		maps.Copy(headers, call.Headers)
+	}
+	call.Headers = headers
 
 	return call
 }
@@ -451,9 +516,17 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 			retryOptions.MaxRetries = *opts.MaxRetries
 		}
 		retryOptions.OnRetry = opts.OnRetry
+		retryOptions.OnAuthRefresh = opts.OnAuthRefresh
 		retry := RetryWithExponentialBackoffRespectingRetryHeaders[*Response](retryOptions)
 		result, err := retry(ctx, func() (*Response, error) {
-			return stepModel.Generate(ctx, Call{
+			// Re-read the model on each retry attempt so that
+			// OnAuthRefresh can swap in a model with fresh credentials.
+			retryModel := stepModel
+			if opts.ModelProvider != nil {
+				retryModel = opts.ModelProvider()
+			}
+
+			return retryModel.Generate(ctx, Call{
 				Prompt:           stepInputMessages,
 				MaxOutputTokens:  opts.MaxOutputTokens,
 				Temperature:      opts.Temperature,
@@ -464,12 +537,25 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 				Tools:            preparedTools,
 				ToolChoice:       &stepToolChoice,
 				UserAgent:        a.settings.userAgent,
+				Headers:          opts.Headers,
 				ProviderOptions:  opts.ProviderOptions,
 			})
 		})
 		if err != nil {
 			return nil, err
 		}
+
+		// Abnormal finishes — length, content filter, provider error,
+		// unknown — can accompany arguments that were cut short. Skip
+		// validation and repair entirely (repair may be an extra model
+		// call), leave the raw tool-call content in the step, and do not
+		// execute (CHARM-2020). FinishReasonStop with tool calls still
+		// validates and dispatches: tolerated for providers that report
+		// stop on a tool turn.
+		suppressed := result.FinishReason == FinishReasonLength ||
+			result.FinishReason == FinishReasonError ||
+			result.FinishReason == FinishReasonContentFilter ||
+			result.FinishReason == FinishReasonUnknown
 
 		var stepToolCalls []ToolCallContent
 		for _, content := range result.Content {
@@ -484,13 +570,22 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 				if toolCall.ProviderExecuted {
 					continue
 				}
+				if suppressed {
+					// Keep the raw call for the step record; never repair
+					// or execute it.
+					stepToolCalls = append(stepToolCalls, toolCall)
+					continue
+				}
 				// Validate and potentially repair the tool call
 				validatedToolCall := a.validateAndRepairToolCall(ctx, toolCall, stepTools, stepExecProviderTools, stepSystemPrompt, stepInputMessages, a.settings.repairToolCall)
 				stepToolCalls = append(stepToolCalls, validatedToolCall)
 			}
 		}
 
-		toolResults, err := a.executeTools(ctx, stepTools, stepExecProviderTools, stepToolCalls, nil)
+		var toolResults []ToolResultContent
+		if !suppressed {
+			toolResults, err = a.executeTools(ctx, stepTools, stepExecProviderTools, stepToolCalls, nil)
+		}
 
 		// If any tool result requested a stop, deliver all results but don't
 		// request another completion from the model.
@@ -552,7 +647,7 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 
 	agentResult := &AgentResult{
 		Steps:      steps,
-		Response:   steps[len(steps)-1].Response,
+		Response:   finalResponse(steps),
 		TotalUsage: totalUsage,
 	}
 	return agentResult, nil
@@ -640,6 +735,7 @@ func toResponseMessages(content []Content) []Message {
 				Output:           result.Result,
 				ProviderExecuted: result.ProviderExecuted,
 				ProviderOptions:  ProviderOptions(result.ProviderMetadata),
+				ClientMetadata:   result.ClientMetadata,
 			}
 			if result.ProviderExecuted {
 				// Provider-executed tool results (e.g. web search)
@@ -737,8 +833,11 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 		return result, false
 	}
 
-	// Execute the tool
-	toolResult, err := runTool(ctx, ToolCall{
+	// Execute the tool, converting a panic into a failed tool result so a
+	// single misbehaving tool cannot take down the whole process. The panic
+	// value and stack are included so they survive in the transcript even
+	// when stderr is lost.
+	toolResult, err := runToolSafely(ctx, runTool, ToolCall{
 		ID:    toolCall.ToolCallID,
 		Name:  toolCall.ToolName,
 		Input: toolCall.Input,
@@ -778,6 +877,25 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 	return result, false
 }
 
+// runToolSafely invokes a tool's run function and converts any panic into a
+// failed tool result. Tool implementations run on goroutines spawned by the
+// agent's step processor where an unrecovered panic would crash the entire
+// host process, so this boundary is the last line of defense. The panic
+// value and stack trace are captured in the returned error so they are
+// preserved in the conversation transcript and any persisted logs.
+func runToolSafely(ctx context.Context, runTool func(ctx context.Context, call ToolCall) (ToolResponse, error), call ToolCall) (toolResult ToolResponse, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := debug.Stack()
+			toolResult = NewTextErrorResponse(fmt.Sprintf(
+				"tool %q panicked: %v\n\n%s", call.Name, r, stack,
+			))
+			err = nil
+		}
+	}()
+	return runTool(ctx, call)
+}
+
 // Stream implements Agent.
 func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult, error) {
 	// Convert AgentStreamCall to AgentCall for preparation
@@ -793,9 +911,12 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 		FrequencyPenalty: opts.FrequencyPenalty,
 		ActiveTools:      opts.ActiveTools,
 		ToolChoice:       opts.ToolChoice,
+		Headers:          opts.Headers,
 		ProviderOptions:  opts.ProviderOptions,
 		MaxRetries:       opts.MaxRetries,
 		OnRetry:          opts.OnRetry,
+		OnAuthRefresh:    opts.OnAuthRefresh,
+		ModelProvider:    opts.ModelProvider,
 		StopWhen:         opts.StopWhen,
 		PrepareStep:      opts.PrepareStep,
 		RepairToolCall:   opts.RepairToolCall,
@@ -897,6 +1018,7 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 			Tools:            preparedTools,
 			ToolChoice:       &stepToolChoice,
 			UserAgent:        a.settings.userAgent,
+			Headers:          call.Headers,
 			ProviderOptions:  call.ProviderOptions,
 		}
 
@@ -906,17 +1028,25 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 			retryOptions.MaxRetries = *call.MaxRetries
 		}
 		retryOptions.OnRetry = call.OnRetry
+		retryOptions.OnAuthRefresh = call.OnAuthRefresh
 		retry := RetryWithExponentialBackoffRespectingRetryHeaders[stepExecutionResult](retryOptions)
 
 		result, err := retry(ctx, func() (stepExecutionResult, error) {
+			// Re-read the model on each retry attempt so that
+			// OnAuthRefresh can swap in a model with fresh credentials.
+			retryModel := stepModel
+			if call.ModelProvider != nil {
+				retryModel = call.ModelProvider()
+			}
+
 			// Create the stream
-			stream, err := stepModel.Stream(ctx, streamCall)
+			stream, err := retryModel.Stream(ctx, streamCall)
 			if err != nil {
 				return stepExecutionResult{}, err
 			}
 
 			// Process the stream
-			result, err := a.processStepStream(ctx, stream, opts, steps, stepTools, stepExecProviderTools)
+			result, err := a.processStepStream(ctx, stream, opts, steps, stepTools, stepExecProviderTools, stepInputMessages)
 			if err != nil {
 				return stepExecutionResult{}, err
 			}
@@ -951,7 +1081,7 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 	// Finish agent stream
 	agentResult := &AgentResult{
 		Steps:      steps,
-		Response:   steps[len(steps)-1].Response,
+		Response:   finalResponse(steps),
 		TotalUsage: totalUsage,
 	}
 
@@ -1040,6 +1170,16 @@ func (a *agent) validateAndRepairToolCall(ctx context.Context, toolCall ToolCall
 					return *repairedToolCall
 				}
 			}
+		} else {
+			// Default repair: try jsonrepair for malformed JSON when no
+			// custom repair function is configured.
+			if repaired, repairErr := jsonrepair.RepairJSON(toolCall.Input); repairErr == nil && repaired != toolCall.Input {
+				repairedCall := toolCall
+				repairedCall.Input = repaired
+				if validateErr := a.validateToolCall(repairedCall, availableTools, execProviderTools); validateErr == nil {
+					return repairedCall
+				}
+			}
 		}
 
 		invalidToolCall := toolCall
@@ -1075,7 +1215,14 @@ func (a *agent) validateToolCall(toolCall ToolCallContent, availableTools []Agen
 				return nil
 			}
 		}
-		return fmt.Errorf("tool not found: %s", toolCall.ToolName)
+		names := make([]string, 0, len(availableTools)+len(execProviderTools))
+		for _, t := range availableTools {
+			names = append(names, t.Info().Name)
+		}
+		for _, ept := range execProviderTools {
+			names = append(names, ept.GetName())
+		}
+		return fmt.Errorf("tool not found: %s. Available tools: %s", toolCall.ToolName, strings.Join(names, ", "))
 	}
 
 	// Validate JSON parsing
@@ -1259,7 +1406,7 @@ func WithOnRetry(callback OnRetryCallback) AgentOption {
 }
 
 // processStepStream processes a single step's stream and returns the step result.
-func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, opts AgentStreamCall, _ []StepResult, stepTools []AgentTool, execProviderTools []ExecutableProviderTool) (stepExecutionResult, error) {
+func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, opts AgentStreamCall, _ []StepResult, stepTools []AgentTool, execProviderTools []ExecutableProviderTool, stepInputMessages []Message) (stepExecutionResult, error) {
 	var stepContent []Content
 	var stepToolCalls []ToolCallContent
 	var stepUsage Usage
@@ -1281,6 +1428,16 @@ func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, op
 		parallel bool
 	}
 	var pendingDispatches []toolExecutionRequest
+	// Raw tool calls as emitted by the provider, before validation/repair,
+	// each with the position in stepContent at which it was emitted. They
+	// are processed only after the stream ends and the finish reason is
+	// known (see below); the position preserves stream order in the
+	// recorded step content.
+	type rawToolCall struct {
+		contentIndex int
+		toolCall     ToolCallContent
+	}
+	var rawToolCalls []rawToolCall
 
 	// Create a map for quick tool lookup
 	toolMap := make(map[string]AgentTool)
@@ -1305,7 +1462,7 @@ func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, op
 
 		switch part.Type {
 		case StreamPartTypeWarnings:
-			stepWarnings = part.Warnings
+			stepWarnings = append(stepWarnings, part.Warnings...)
 			if opts.OnWarnings != nil {
 				err := opts.OnWarnings(part.Warnings)
 				if err != nil {
@@ -1437,43 +1594,16 @@ func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, op
 				ProviderMetadata: part.ProviderMetadata,
 			}
 
-			// Provider-executed tool calls are handled by the provider
-			// and should not be validated or executed by the agent.
-			if toolCall.ProviderExecuted {
-				stepContent = append(stepContent, toolCall)
-				if opts.OnToolCall != nil {
-					err := opts.OnToolCall(toolCall)
-					if err != nil {
-						return stepExecutionResult{}, err
-					}
-				}
-				delete(activeToolCalls, part.ID)
-			} else {
-				// Validate and potentially repair the tool call
-				validatedToolCall := a.validateAndRepairToolCall(ctx, toolCall, stepTools, execProviderTools, a.settings.systemPrompt, nil, opts.RepairToolCall)
-				stepToolCalls = append(stepToolCalls, validatedToolCall)
-				stepContent = append(stepContent, validatedToolCall)
-
-				if opts.OnToolCall != nil {
-					err := opts.OnToolCall(validatedToolCall)
-					if err != nil {
-						return stepExecutionResult{}, err
-					}
-				}
-
-				// Determine if tool can run in parallel
-				isParallel := false
-				if tool, exists := toolMap[validatedToolCall.ToolName]; exists {
-					isParallel = tool.Info().Parallel
-				}
-
-				// Buffer dispatch until stream is fully consumed so that all
-				// OnToolCall callbacks complete before any tool result is written.
-				pendingDispatches = append(pendingDispatches, toolExecutionRequest{toolCall: validatedToolCall, parallel: isParallel})
-
-				// Clean up active tool call
-				delete(activeToolCalls, part.ID)
-			}
+			// Buffer the call. Validation, repair, and the OnToolCall
+			// callback all wait until the stream has ended and the finish
+			// reason is known: a provider that emits a ToolCall before a
+			// length/error finish must not have its possibly-truncated
+			// arguments repaired (repair may be an extra model call) or
+			// exposed to consumers — provider-executed calls included; the
+			// provider may run them, but consumers hear about them only for
+			// completed turns (CHARM-2020).
+			rawToolCalls = append(rawToolCalls, rawToolCall{contentIndex: len(stepContent), toolCall: toolCall})
+			delete(activeToolCalls, part.ID)
 
 		case StreamPartTypeToolResult:
 			// Provider-executed tool results (e.g. web search)
@@ -1551,7 +1681,11 @@ func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, op
 					toolResults = append(toolResults, result)
 					if isCriticalError && toolExecutionErr == nil {
 						if errorResult, ok := result.Result.(ToolResultOutputContentError); ok && errorResult.Error != nil {
-							toolExecutionErr = errorResult.Error
+							toolExecutionErr = &ToolExecutionError{
+								ToolName:   result.ToolName,
+								ToolCallID: result.ToolCallID,
+								Err:        errorResult.Error,
+							}
 						}
 					}
 					toolStateMu.Unlock()
@@ -1563,7 +1697,11 @@ func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, op
 				toolResults = append(toolResults, result)
 				if isCriticalError && toolExecutionErr == nil {
 					if errorResult, ok := result.Result.(ToolResultOutputContentError); ok && errorResult.Error != nil {
-						toolExecutionErr = errorResult.Error
+						toolExecutionErr = &ToolExecutionError{
+							ToolName:   result.ToolName,
+							ToolCallID: result.ToolCallID,
+							Err:        errorResult.Error,
+						}
 					}
 				}
 				toolStateMu.Unlock()
@@ -1572,10 +1710,83 @@ func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, op
 		}
 	})
 
+	// Process buffered tool calls now that the finish reason is known.
+	// Abnormal finishes — length, content filter, provider error, unknown —
+	// can accompany arguments that were cut short: record the raw call in
+	// the step content, but never repair (repair may be an extra model
+	// call), never fire OnToolCall, and never dispatch (CHARM-2020).
+	abnormalFinish := stepFinishReason == FinishReasonLength ||
+		stepFinishReason == FinishReasonError ||
+		stepFinishReason == FinishReasonContentFilter ||
+		stepFinishReason == FinishReasonUnknown
+	// Splice each processed call into the position it was emitted at in the
+	// stream, so step content preserves the provider's ordering. Calls
+	// emitted back-to-back share the same recorded index; track insertions
+	// so they land in emission order, not reversed.
+	insertContent := func(at int, c Content) {
+		stepContent = append(stepContent, nil)
+		copy(stepContent[at+1:], stepContent[at:])
+		stepContent[at] = c
+	}
+	inserted := 0
+	for _, raw := range rawToolCalls {
+		at := raw.contentIndex + inserted
+		toolCall := raw.toolCall
+		if abnormalFinish {
+			stepToolCalls = append(stepToolCalls, toolCall)
+			insertContent(at, toolCall)
+			inserted++
+			continue
+		}
+		// Provider-executed tool calls (e.g. web search) were already run by
+		// the provider: record them and notify, but never validate, repair,
+		// or dispatch them.
+		if toolCall.ProviderExecuted {
+			insertContent(at, toolCall)
+			inserted++
+			if opts.OnToolCall != nil {
+				err := opts.OnToolCall(toolCall)
+				if err != nil {
+					return stepExecutionResult{}, err
+				}
+			}
+			continue
+		}
+		// Validate and potentially repair the tool call
+		validatedToolCall := a.validateAndRepairToolCall(ctx, toolCall, stepTools, execProviderTools, a.settings.systemPrompt, stepInputMessages, opts.RepairToolCall)
+		stepToolCalls = append(stepToolCalls, validatedToolCall)
+		insertContent(at, validatedToolCall)
+		inserted++
+
+		if opts.OnToolCall != nil {
+			err := opts.OnToolCall(validatedToolCall)
+			if err != nil {
+				return stepExecutionResult{}, err
+			}
+		}
+
+		// Determine if tool can run in parallel
+		isParallel := false
+		if tool, exists := toolMap[validatedToolCall.ToolName]; exists {
+			isParallel = tool.Info().Parallel
+		}
+
+		// Buffer dispatch until stream is fully consumed so that all
+		// OnToolCall callbacks complete before any tool result is written.
+		pendingDispatches = append(pendingDispatches, toolExecutionRequest{toolCall: validatedToolCall, parallel: isParallel})
+	}
+
 	// Dispatch all buffered tool calls now that every OnToolCall callback has
-	// been called, then close and wait.
-	for _, req := range pendingDispatches {
-		toolChan <- req
+	// been called, then close and wait. Dispatch only on an explicit
+	// tool-calls turn: any other finish reason (length, content filter,
+	// provider error, unknown) can accompany arguments that were cut short,
+	// and executing those is how truncated input reaches tools
+	// (CHARM-2020). The tool-call content stays in stepContent either way,
+	// so the step result records what the model tried to call.
+	if stepFinishReason == FinishReasonToolCalls {
+		for _, req := range pendingDispatches {
+			toolChan <- req
+		}
 	}
 
 	// Close the tool execution channel and wait for all executions to complete.
@@ -1587,8 +1798,18 @@ func (a *agent) processStepStream(ctx context.Context, stream StreamResponse, op
 		return stepExecutionResult{}, toolExecutionErr
 	}
 
-	// Add tool results to content if any
+	// Add tool results to content in the order the model called the tools,
+	// not the order they completed in (F6, CHARM-2020). Results carry their
+	// call id; providers that pair results with calls positionally, and any
+	// consumer diffing step content, depend on call order.
 	if len(toolResults) > 0 {
+		positionByCallID := make(map[string]int, len(pendingDispatches))
+		for i, req := range pendingDispatches {
+			positionByCallID[req.toolCall.ToolCallID] = i
+		}
+		slices.SortStableFunc(toolResults, func(a, b ToolResultContent) int {
+			return cmp.Compare(positionByCallID[a.ToolCallID], positionByCallID[b.ToolCallID])
+		})
 		for _, result := range toolResults {
 			stepContent = append(stepContent, result)
 		}

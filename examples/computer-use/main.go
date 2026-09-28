@@ -19,8 +19,8 @@ import (
 	"image/png"
 	"os"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/anthropic"
+	"charm.land/fantasy"
+	"charm.land/fantasy/providers/anthropic"
 )
 
 // takeScreenshot is a stub that simulates capturing a screenshot.
@@ -82,7 +82,8 @@ func main() {
 	// the tool-call loop: it sends the prompt, executes any tool
 	// calls the model returns, feeds the results back, and repeats
 	// until the model stops requesting tools.
-	agent := fantasy.NewAgent(model,
+	agent := fantasy.NewAgent(
+		model,
 		fantasy.WithProviderDefinedTools(computerTool),
 		fantasy.WithStopConditions(fantasy.StepCountIs(10)),
 	)

@@ -231,6 +231,13 @@ func (p *parser) parseJSON() (any, error) {
 				return p.parseNumber()
 			}
 		}
+		// Only the JSON quote character, not every isStringDelimiter rune: text
+		// that begins with an apostrophe or a curly quote has to stay junk.
+		if p.context.empty && char == '"' {
+			if onlyWhitespaceBefore(p) {
+				return p.parseString()
+			}
+		}
 		if char == '#' || char == '/' {
 			return p.parseComment()
 		}
@@ -436,7 +443,7 @@ func (p *parser) parseNumber() (any, error) {
 	numberStr := ""
 	char, ok := p.getCharAt(0)
 	isArray := p.context.current != nil && *p.context.current == contextArray
-	for ok && strings.ContainsRune(numberChars, char) && (!isArray || char != ',' || strings.Contains(numberStr, "/")) {
+	for ok && (strings.ContainsRune(numberChars, char) || isExponentSign(char, numberStr)) && (!isArray || char != ',' || strings.Contains(numberStr, "/")) {
 		if char != '_' {
 			numberStr += string(char)
 		}
@@ -447,17 +454,18 @@ func (p *parser) parseNumber() (any, error) {
 		p.index -= len([]rune(numberStr))
 		return p.parseString()
 	}
-	if len(numberStr) > 0 {
+	for len(numberStr) > 0 {
 		last := numberStr[len(numberStr)-1]
-		if last == '-' || last == 'e' || last == 'E' || last == '/' || last == ',' {
-			numberStr = numberStr[:len(numberStr)-1]
-			p.index--
+		if last != '-' && last != 'e' && last != 'E' && last != '/' && last != ',' && last != '+' {
+			break
 		}
+		numberStr = numberStr[:len(numberStr)-1]
+		p.index--
 	}
-	if strings.Contains(numberStr, "/") || strings.Contains(numberStr, "-") || strings.Contains(numberStr, ",") {
-		if numberStr == "-" {
-			return "", nil
-		}
+	if numberStr == "" || numberStr == "-" {
+		return "", nil
+	}
+	if hasNumericSeparator(numberStr) {
 		if strings.ContainsAny(numberStr, "eE") {
 			floatVal, err := strconv.ParseFloat(numberStr, 64)
 			if err == nil {
@@ -476,10 +484,35 @@ func (p *parser) parseNumber() (any, error) {
 		}
 		return numberStr, nil
 	}
-	if numberStr == "" {
-		return "", nil
-	}
 	return numberValue{raw: numberStr}, nil
+}
+
+// isExponentSign reports whether char is the "+" of an exponent such as "1e+2".
+// "+" is deliberately left out of numberChars: anywhere else it is not part of
+// a JSON number and has to end the literal.
+func isExponentSign(char rune, numberStr string) bool {
+	if char != '+' || numberStr == "" {
+		return false
+	}
+	last := numberStr[len(numberStr)-1]
+	return last == 'e' || last == 'E'
+}
+
+// hasNumericSeparator reports whether the characters collected as a number are
+// interleaved with something that cannot appear in a JSON number, such as the
+// "-" of "10-20" or the "/" of "1/3". A "-" at the front is a sign and a "-"
+// right after an exponent marker belongs to the exponent, so neither counts:
+// both leave a literal that must keep its number type.
+func hasNumericSeparator(numberStr string) bool {
+	if strings.ContainsAny(numberStr, "/,") {
+		return true
+	}
+	for i := 1; i < len(numberStr); i++ {
+		if numberStr[i] == '-' && numberStr[i-1] != 'e' && numberStr[i-1] != 'E' {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *parser) parseObject() (any, error) {
@@ -940,8 +973,14 @@ func (p *parser) parseString() (any, error) {
 				if len(nextChars) == numChars && isHexString(string(nextChars)) {
 					p.log("Found a unicode escape sequence, normalizing it")
 					parsed, _ := strconv.ParseInt(string(nextChars), 16, 32)
-					stringAcc = append(stringAcc[:len(stringAcc)-1], rune(parsed))
+					code := rune(parsed)
 					p.index += 1 + numChars
+					if char == 'u' {
+						if paired, isPair := p.readSurrogatePair(code); isPair {
+							code = paired
+						}
+					}
+					stringAcc = append(stringAcc[:len(stringAcc)-1], code)
 					char, ok = p.getCharAt(0)
 					continue
 				}
@@ -1143,7 +1182,12 @@ func (p *parser) parseString() (any, error) {
 	} else {
 		p.index++
 	}
-	if !p.streamStable && (missingQuotes || (len(stringAcc) > 0 && stringAcc[len(stringAcc)-1] == '\n')) {
+	// Only a line break that is literally present in the source is dropped here. An
+	// escaped \n decodes to the same rune but is string content, so trimming it would
+	// silently change an already valid document.
+	prevChar, hasPrevChar := p.getCharAt(-2)
+	rawTrailingNewline := ok && char == rdelim && hasPrevChar && prevChar == '\n'
+	if !p.streamStable && (missingQuotes || rawTrailingNewline) {
 		stringAcc = trimRightWhitespace(stringAcc)
 	}
 	if missingQuotes && p.context.empty {
@@ -1173,6 +1217,31 @@ func (p *parser) parseString() (any, error) {
 		}
 	}
 	return string(stringAcc), nil
+}
+
+// readSurrogatePair consumes the \uXXXX escape that follows a surrogate, so a
+// non-BMP character decodes to one code point instead of two invalid ones.
+func (p *parser) readSurrogatePair(high rune) (rune, bool) {
+	if !utf16.IsSurrogate(high) {
+		return 0, false
+	}
+	if p.sliceString(p.index, p.index+2) != "\\u" {
+		return 0, false
+	}
+	digits := p.sliceString(p.index+2, p.index+6)
+	if !isHexString(digits) {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(digits, 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	combined := utf16.DecodeRune(high, rune(parsed))
+	if combined == unicode.ReplacementChar {
+		return 0, false
+	}
+	p.index += 6
+	return combined, true
 }
 
 func (p *parser) parseBooleanOrNull() any {
@@ -1460,11 +1529,10 @@ func RepairJSON(input string, opts ...Option) (string, error) {
 		return "", err
 	}
 	if str, ok := value.(string); ok {
-		trimmed := strings.TrimSpace(str)
-		if str == "" || trimmed == "" {
+		if strings.TrimSpace(str) == "" {
 			return "", nil
 		}
-		return "", nil
+		return serialize(value, ensureASCIIValue(cfg)), nil
 	}
 	if value == "" {
 		return "", nil

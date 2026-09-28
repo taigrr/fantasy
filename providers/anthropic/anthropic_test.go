@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/require"
 	"github.com/taigrr/fantasy"
 )
@@ -322,6 +322,7 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 				Role: fantasy.MessageRoleUser,
 				Content: []fantasy.MessagePart{
 					fantasy.FilePart{
+						Filename:  "quarterly_report.v1.pdf",
 						Data:      []byte("fake pdf data"),
 						MediaType: "application/pdf",
 					},
@@ -333,10 +334,67 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 
 		require.Empty(t, systemBlocks)
 		require.Len(t, messages, 1)
+		require.Len(t, messages[0].Content, 1)
+		require.NotNil(t, messages[0].Content[0].OfDocument)
+		require.Equal(t, "quarterly report v1 pdf", messages[0].Content[0].OfDocument.Title.Value)
+		require.True(t, messages[0].Content[0].OfDocument.Title.Valid())
+		require.Empty(t, warnings)
+	})
+
+	t.Run("should fall back to Document title when PDF filename is missing", func(t *testing.T) {
+		t.Parallel()
+
+		prompt := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.FilePart{
+						Data:      []byte("fake pdf data"),
+						MediaType: "application/pdf",
+					},
+				},
+			},
+		}
+
+		systemBlocks, messages, warnings := toPrompt(prompt, true)
+
+		require.Empty(t, systemBlocks)
+		require.Len(t, messages, 1)
+		require.Len(t, messages[0].Content, 1)
+		require.NotNil(t, messages[0].Content[0].OfDocument)
+		require.Equal(t, "Document", messages[0].Content[0].OfDocument.Title.Value)
+		require.True(t, messages[0].Content[0].OfDocument.Title.Valid())
 		require.Empty(t, warnings)
 	})
 
 	t.Run("should keep user messages with text document content", func(t *testing.T) {
+		t.Parallel()
+
+		prompt := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.FilePart{
+						Filename:  "notes_v1.md",
+						Data:      []byte("# Hello World\nSome markdown content"),
+						MediaType: "text/markdown",
+					},
+				},
+			},
+		}
+
+		systemBlocks, messages, warnings := toPrompt(prompt, true)
+
+		require.Empty(t, systemBlocks)
+		require.Len(t, messages, 1)
+		require.Len(t, messages[0].Content, 1)
+		require.NotNil(t, messages[0].Content[0].OfDocument)
+		require.Equal(t, "notes v1 md", messages[0].Content[0].OfDocument.Title.Value)
+		require.True(t, messages[0].Content[0].OfDocument.Title.Valid())
+		require.Empty(t, warnings)
+	})
+
+	t.Run("should fall back to Document title when text filename is missing", func(t *testing.T) {
 		t.Parallel()
 
 		prompt := fantasy.Prompt{
@@ -355,7 +413,38 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 
 		require.Empty(t, systemBlocks)
 		require.Len(t, messages, 1)
+		require.Len(t, messages[0].Content, 1)
+		require.NotNil(t, messages[0].Content[0].OfDocument)
+		require.Equal(t, "Document", messages[0].Content[0].OfDocument.Title.Value)
+		require.True(t, messages[0].Content[0].OfDocument.Title.Valid())
 		require.Empty(t, warnings)
+	})
+
+	t.Run("should warn on unsupported file media type while keeping visible content", func(t *testing.T) {
+		t.Parallel()
+
+		prompt := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: "look at this archive"},
+					fantasy.FilePart{
+						Filename:  "logs.zip",
+						Data:      []byte("not supported"),
+						MediaType: "application/zip",
+					},
+				},
+			},
+		}
+
+		systemBlocks, messages, warnings := toPrompt(prompt, true)
+
+		require.Empty(t, systemBlocks)
+		require.Len(t, messages, 1)
+		require.Len(t, warnings, 1)
+		require.Equal(t, fantasy.CallWarningTypeOther, warnings[0].Type)
+		require.Contains(t, warnings[0].Message, "application/zip")
+		require.Contains(t, warnings[0].Message, "not supported")
 	})
 
 	t.Run("should drop user messages without visible content", func(t *testing.T) {
@@ -377,10 +466,13 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 
 		require.Empty(t, systemBlocks)
 		require.Empty(t, messages)
-		require.Len(t, warnings, 1)
+		require.Len(t, warnings, 2)
 		require.Equal(t, fantasy.CallWarningTypeOther, warnings[0].Type)
-		require.Contains(t, warnings[0].Message, "dropping empty user message")
-		require.Contains(t, warnings[0].Message, "neither user-facing content nor tool results")
+		require.Contains(t, warnings[0].Message, "application/zip")
+		require.Contains(t, warnings[0].Message, "not supported")
+		require.Equal(t, fantasy.CallWarningTypeOther, warnings[1].Type)
+		require.Contains(t, warnings[1].Message, "dropping empty user message")
+		require.Contains(t, warnings[1].Message, "neither user-facing content nor tool results")
 	})
 
 	t.Run("should keep user messages with tool results", func(t *testing.T) {
@@ -520,6 +612,7 @@ func TestParseOptions_Effort(t *testing.T) {
 		"send_reasoning":            true,
 		"thinking":                  map[string]any{"budget_tokens": int64(2048)},
 		"effort":                    "medium",
+		"thinking_display":          "summarized",
 		"disable_parallel_tool_use": true,
 	})
 	require.NoError(t, err)
@@ -529,6 +622,8 @@ func TestParseOptions_Effort(t *testing.T) {
 	require.Equal(t, int64(2048), options.Thinking.BudgetTokens)
 	require.NotNil(t, options.Effort)
 	require.Equal(t, EffortMedium, *options.Effort)
+	require.NotNil(t, options.ThinkingDisplay)
+	require.Equal(t, ThinkingDisplaySummarized, *options.ThinkingDisplay)
 	require.NotNil(t, options.DisableParallelToolUse)
 	require.True(t, *options.DisableParallelToolUse)
 }
@@ -561,6 +656,206 @@ func TestGenerate_SendsOutputConfigEffort(t *testing.T) {
 	require.Equal(t, "POST", call.method)
 	require.Equal(t, "/v1/messages", call.path)
 	requireAnthropicEffort(t, call.body, EffortMedium)
+}
+
+func TestGenerate_SendsThinkingDisplay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		model       string
+		options     func() *ProviderOptions
+		wantType    string
+		wantDisplay string
+		wantBudget  int64
+	}{
+		{
+			name:  "explicit display with adaptive thinking",
+			model: "claude-sonnet-4-20250514",
+			options: func() *ProviderOptions {
+				effort := EffortMedium
+				display := ThinkingDisplayOmitted
+				return &ProviderOptions{Effort: &effort, ThinkingDisplay: &display}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "omitted",
+		},
+		{
+			name:  "explicit display with budget thinking",
+			model: "claude-sonnet-4-20250514",
+			options: func() *ProviderOptions {
+				display := ThinkingDisplaySummarized
+				return &ProviderOptions{
+					Thinking:        &ThinkingProviderOption{BudgetTokens: 2048},
+					ThinkingDisplay: &display,
+				}
+			},
+			wantType:    "enabled",
+			wantDisplay: "summarized",
+			wantBudget:  2048,
+		},
+		{
+			name:  "opus models default to summarized display",
+			model: "claude-opus-4-7-20260101",
+			options: func() *ProviderOptions {
+				effort := EffortHigh
+				return &ProviderOptions{Effort: &effort}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "bedrock opus models default to summarized display",
+			model: "us.anthropic.claude-opus-4-8-20260101-v1:0",
+			options: func() *ProviderOptions {
+				effort := EffortHigh
+				return &ProviderOptions{Effort: &effort}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "explicit display overrides opus default",
+			model: "claude-opus-4-8-20260101",
+			options: func() *ProviderOptions {
+				effort := EffortHigh
+				display := ThinkingDisplayOmitted
+				return &ProviderOptions{Effort: &effort, ThinkingDisplay: &display}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "omitted",
+		},
+		{
+			name:  "mythos models default to adaptive thinking",
+			model: "claude-mythos-preview",
+			options: func() *ProviderOptions {
+				return &ProviderOptions{}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "opus models use adaptive thinking when budget thinking configured",
+			model: "claude-opus-4-7",
+			options: func() *ProviderOptions {
+				return &ProviderOptions{Thinking: &ThinkingProviderOption{BudgetTokens: 2048}}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "older opus models keep provider default",
+			model: "claude-opus-4-6-20260101",
+			options: func() *ProviderOptions {
+				effort := EffortHigh
+				return &ProviderOptions{Effort: &effort}
+			},
+			wantType: "adaptive",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, calls := newAnthropicJSONServer(mockAnthropicGenerateResponse())
+			defer server.Close()
+
+			provider, err := New(
+				WithAPIKey("test-api-key"),
+				WithBaseURL(server.URL),
+			)
+			require.NoError(t, err)
+
+			model, err := provider.LanguageModel(context.Background(), tt.model)
+			require.NoError(t, err)
+
+			_, err = model.Generate(context.Background(), fantasy.Call{
+				Prompt:          testPrompt(),
+				ProviderOptions: NewProviderOptions(tt.options()),
+			})
+			require.NoError(t, err)
+
+			call := awaitAnthropicCall(t, calls)
+			thinking, ok := call.body["thinking"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, tt.wantType, thinking["type"])
+			if tt.wantDisplay == "" {
+				require.NotContains(t, thinking, "display")
+			} else {
+				require.Equal(t, tt.wantDisplay, thinking["display"])
+			}
+			if tt.wantBudget != 0 {
+				require.InDelta(t, tt.wantBudget, thinking["budget_tokens"], 0)
+			}
+		})
+	}
+}
+
+func TestGenerate_DoesNotEnableThinkingForPlainOpus(t *testing.T) {
+	t.Parallel()
+
+	server, calls := newAnthropicJSONServer(mockAnthropicGenerateResponse())
+	defer server.Close()
+
+	provider, err := New(
+		WithAPIKey("test-api-key"),
+		WithBaseURL(server.URL),
+	)
+	require.NoError(t, err)
+
+	model, err := provider.LanguageModel(context.Background(), "claude-opus-4-7")
+	require.NoError(t, err)
+
+	_, err = model.Generate(context.Background(), fantasy.Call{Prompt: testPrompt()})
+	require.NoError(t, err)
+
+	call := awaitAnthropicCall(t, calls)
+	require.NotContains(t, call.body, "thinking")
+}
+
+func TestDefaultsToOmittedThinkingDisplay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		model string
+		want  bool
+	}{
+		{name: "opus 4.7 alias", model: "claude-opus-4-7", want: true},
+		{name: "opus 4.7", model: "claude-opus-4-7-20260101", want: true},
+		{name: "opus 4.10", model: "claude-opus-4-10-20260101", want: true},
+		{name: "bedrock opus 4.8 alias", model: "us.anthropic.claude-opus-4-8-v1", want: true},
+		{name: "bedrock opus 4.8", model: "us.anthropic.claude-opus-4-8-20260101-v1:0", want: true},
+		{name: "mythos preview", model: "claude-mythos-preview", want: true},
+		{name: "bedrock mythos preview", model: "anthropic.claude-mythos-preview", want: true},
+		// The 5 generation also defaults to an omitted display.
+		{name: "opus 5", model: "claude-opus-5", want: true},
+		{name: "opus 5 dated", model: "claude-opus-5-20260115", want: true},
+		{name: "bedrock opus 5", model: "us.anthropic.claude-opus-5-v1:0", want: true},
+		{name: "sonnet 5", model: "claude-sonnet-5", want: true},
+		{name: "fable 5", model: "claude-fable-5", want: true},
+		{name: "fable 5.1", model: "claude-fable-5-1", want: true},
+		{name: "mythos 5", model: "claude-mythos-5", want: true},
+		{name: "mythos 5.1", model: "claude-mythos-5-1", want: true},
+		{name: "uppercase and padded", model: "  CLAUDE-SONNET-5  ", want: true},
+		{name: "opus 4.6", model: "claude-opus-4-6-20260101", want: false},
+		{name: "opus 4 date only", model: "claude-opus-4-20250514", want: false},
+		{name: "bedrock opus 4 date only", model: "us.anthropic.claude-opus-4-20250514-v1:0", want: false},
+		{name: "sonnet", model: "claude-sonnet-4-20250514", want: false},
+		{name: "sonnet 4.5", model: "claude-sonnet-4-5", want: false},
+		{name: "haiku 4.5", model: "claude-haiku-4-5", want: false},
+		{name: "no minor", model: "claude-opus-4", want: false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, defaultsToOmittedThinkingDisplay(tt.model))
+		})
+	}
 }
 
 func TestStream_SendsOutputConfigEffort(t *testing.T) {
@@ -598,6 +893,122 @@ func TestStream_SendsOutputConfigEffort(t *testing.T) {
 	require.Equal(t, "POST", call.method)
 	require.Equal(t, "/v1/messages", call.path)
 	requireAnthropicEffort(t, call.body, EffortHigh)
+}
+
+func TestStream_RequiresMessageStopBeforeFinish(t *testing.T) {
+	t.Parallel()
+
+	completeTextStream := []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_complete","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	}
+
+	missingStopReasonStream := append([]string(nil), completeTextStream[:len(completeTextStream)-2]...)
+	missingStopReasonStream = append(missingStopReasonStream, completeTextStream[len(completeTextStream)-1])
+
+	tests := []struct {
+		name           string
+		chunks         []string
+		wantFinish     bool
+		wantRetryable  bool
+		wantErrContain string
+	}{
+		{
+			name:       "complete stream finishes",
+			chunks:     completeTextStream,
+			wantFinish: true,
+		},
+		{
+			name:          "message_stop without stop_reason errors",
+			chunks:        missingStopReasonStream,
+			wantRetryable: true,
+		},
+		{
+			name:          "text stream closed before message_stop errors",
+			chunks:        completeTextStream[:len(completeTextStream)-1],
+			wantRetryable: true,
+		},
+		{
+			// api_error is a temporary provider-side fault, so it is worth
+			// retrying even though it arrived inside a 200 response.
+			name: "provider error event is preserved and retried",
+			chunks: []string{
+				anthropicSSEEvent("error", `{"type":"error","error":{"type":"api_error","message":"stream down"}}`),
+			},
+			wantRetryable:  true,
+			wantErrContain: "stream down",
+		},
+		{
+			name: "permanent error event is not retried",
+			chunks: []string{
+				anthropicSSEEvent("error", `{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}`),
+			},
+			wantErrContain: "bad request",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, calls := newAnthropicStreamingServer(tt.chunks)
+			defer server.Close()
+
+			provider, err := New(
+				WithAPIKey("test-api-key"),
+				WithBaseURL(server.URL),
+			)
+			require.NoError(t, err)
+
+			model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+			require.NoError(t, err)
+
+			stream, err := model.Stream(context.Background(), fantasy.Call{Prompt: testPrompt()})
+			require.NoError(t, err)
+
+			parts := collectAnthropicStreamParts(stream)
+			_ = awaitAnthropicCall(t, calls)
+
+			var finishes, errorParts []fantasy.StreamPart
+			for _, part := range parts {
+				switch part.Type {
+				case fantasy.StreamPartTypeFinish:
+					finishes = append(finishes, part)
+				case fantasy.StreamPartTypeError:
+					errorParts = append(errorParts, part)
+				}
+			}
+
+			if tt.wantFinish {
+				require.Len(t, finishes, 1)
+				require.Empty(t, errorParts)
+				return
+			}
+
+			require.Empty(t, finishes)
+			require.Len(t, errorParts, 1)
+			require.Error(t, errorParts[0].Error)
+			if tt.wantErrContain != "" {
+				require.Contains(t, errorParts[0].Error.Error(), tt.wantErrContain)
+			}
+
+			var providerErr *fantasy.ProviderError
+			if tt.wantRetryable {
+				require.ErrorAs(t, errorParts[0].Error, &providerErr)
+				require.True(t, providerErr.IsRetryable())
+			} else {
+				require.NotErrorIs(t, errorParts[0].Error, io.ErrUnexpectedEOF)
+				if errors.As(errorParts[0].Error, &providerErr) {
+					require.False(t, providerErr.IsRetryable())
+					require.NotErrorIs(t, providerErr.Cause, io.ErrUnexpectedEOF)
+				}
+			}
+		})
+	}
 }
 
 type anthropicCall struct {
@@ -1125,7 +1536,8 @@ func TestGenerate_WebSearchResponse(t *testing.T) {
 
 	// TextContent with the final answer.
 	require.Len(t, texts, 1)
-	require.Equal(t,
+	require.Equal(
+		t,
 		"Based on recent search results, here is the latest AI news.",
 		texts[0].Text,
 	)
@@ -2587,7 +2999,8 @@ func TestGenerate_ComputerUseTool(t *testing.T) {
 
 		// Build the next prompt: append the assistant tool-call turn
 		// and the user screenshot-result turn.
-		prompt = append(prompt,
+		prompt = append(
+			prompt,
 			fantasy.Message{
 				Role: fantasy.MessageRoleAssistant,
 				Content: []fantasy.MessagePart{
@@ -2767,7 +3180,8 @@ func TestStream_ComputerUseTool(t *testing.T) {
 		require.NoError(t, err, "turn %d", turn)
 		gotActions = append(gotActions, parsed.Action)
 
-		prompt = append(prompt,
+		prompt = append(
+			prompt,
 			fantasy.Message{
 				Role: fantasy.MessageRoleAssistant,
 				Content: []fantasy.MessagePart{
@@ -2843,4 +3257,95 @@ func TestStream_TruncatedWithoutStopReason(t *testing.T) {
 	require.ErrorAs(t, errPart.Error, &providerErr)
 	require.True(t, providerErr.IsRetryable())
 	require.ErrorIs(t, providerErr.Cause, io.ErrUnexpectedEOF)
+}
+
+func TestMapFinishReason(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		reason   string
+		expected fantasy.FinishReason
+	}{
+		{"end_turn", fantasy.FinishReasonStop},
+		{"pause_turn", fantasy.FinishReasonStop},
+		{"stop_sequence", fantasy.FinishReasonStop},
+		{"max_tokens", fantasy.FinishReasonLength},
+		{"model_context_window_exceeded", fantasy.FinishReasonLength},
+		{"tool_use", fantasy.FinishReasonToolCalls},
+		{"refusal", fantasy.FinishReasonContentFilter},
+		{"", fantasy.FinishReasonUnknown},
+		{"unrecognized_future_reason", fantasy.FinishReasonUnknown},
+	}
+
+	for _, tc := range tests {
+		require.Equal(t, tc.expected, mapFinishReason(tc.reason), "stop_reason %q", tc.reason)
+	}
+}
+
+// A long reasoning turn sends pings and nothing else. Those have to reach the
+// consumer, or an idle-timeout watchdog cannot tell a thinking model from a
+// dead connection.
+func TestStream_ForwardsKeepalivesDuringSilence(t *testing.T) {
+	t.Parallel()
+
+	chunks := []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_ping","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		// The quiet stretch: the model is working, the server is pinging.
+		anthropicSSEEvent("ping", `{"type":"ping"}`),
+		anthropicSSEEvent("ping", `{"type":"ping"}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	}
+
+	server, _ := newAnthropicStreamingServer(chunks)
+	defer server.Close()
+
+	provider, err := New(WithAPIKey("test-api-key"), WithBaseURL(server.URL))
+	require.NoError(t, err)
+	model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	stream, err := model.Stream(context.Background(), fantasy.Call{Prompt: testPrompt()})
+	require.NoError(t, err)
+
+	var types []fantasy.StreamPartType
+	var keepalives int
+	for part := range stream {
+		types = append(types, part.Type)
+		if part.Type == fantasy.StreamPartTypeKeepalive {
+			keepalives++
+		}
+	}
+
+	// Two pings, plus message_start and message_delta, all of which are
+	// activity without content.
+	require.GreaterOrEqual(t, keepalives, 2, "pings must surface as keepalives, got parts: %v", types)
+
+	// The content still arrives, in order, unaffected by the keepalives.
+	require.Contains(t, types, fantasy.StreamPartTypeTextDelta)
+	require.Contains(t, types, fantasy.StreamPartTypeFinish)
+}
+
+// An explicit caller preference always wins over the default.
+func TestThinkingDisplayRespectsCallerChoice(t *testing.T) {
+	t.Parallel()
+
+	omittedByChoice := ThinkingDisplayOmitted
+	display, ok := thinkingDisplay(&ProviderOptions{ThinkingDisplay: &omittedByChoice}, "claude-opus-5")
+	require.True(t, ok)
+	require.Equal(t, ThinkingDisplayOmitted, display)
+}
+
+// Widening the display default must not change which models get adaptive
+// thinking: that rewrites the request shape, where a display only adds a field.
+func TestDisplayDefaultDoesNotChangeThinkingMode(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, requiresAdaptiveThinking("claude-opus-5"))
+	require.False(t, requiresAdaptiveThinking("claude-sonnet-5"))
+	require.True(t, requiresAdaptiveThinking("claude-opus-4-7"))
+	require.True(t, requiresAdaptiveThinking("claude-mythos-preview"))
 }

@@ -235,7 +235,8 @@ func (g languageModel) prepareParams(call fantasy.Call) (*genai.GenerateContentC
 		}
 	}
 
-	systemInstructions, content, warnings := toGooglePrompt(call.Prompt)
+	isVertexAI := g.providerOptions.backend == genai.BackendVertexAI
+	systemInstructions, content, warnings := toGooglePrompt(call.Prompt, isVertexAI)
 
 	if providerOptions.ThinkingConfig != nil {
 		if providerOptions.ThinkingConfig.IncludeThoughts != nil &&
@@ -347,7 +348,7 @@ func (g languageModel) prepareParams(call fantasy.Call) (*genai.GenerateContentC
 	return config, content, warnings, nil
 }
 
-func toGooglePrompt(prompt fantasy.Prompt) (*genai.Content, []*genai.Content, []fantasy.CallWarning) { //nolint: unparam
+func toGooglePrompt(prompt fantasy.Prompt, isVertexAI bool) (*genai.Content, []*genai.Content, []fantasy.CallWarning) { //nolint: unparam
 	var systemInstructions *genai.Content
 	var content []*genai.Content
 	var warnings []fantasy.CallWarning
@@ -462,6 +463,11 @@ func toGooglePrompt(prompt fantasy.Prompt) (*genai.Content, []*genai.Content, []
 							Args: result,
 						},
 					}
+
+					// Vertex breaks with a 400 if this field be present.
+					if isVertexAI {
+						geminiPart.FunctionCall.ID = ""
+					}
 					if currentReasoningMetadata != nil {
 						geminiPart.ThoughtSignature = []byte(currentReasoningMetadata.Signature)
 						currentReasoningMetadata = nil
@@ -506,12 +512,18 @@ func toGooglePrompt(prompt fantasy.Prompt) (*genai.Content, []*genai.Content, []
 							continue
 						}
 						response := map[string]any{"result": content.Text}
+						functionResponse := &genai.FunctionResponse{
+							ID:       result.ToolCallID,
+							Response: response,
+							Name:     toolCall.ToolName,
+						}
+
+						// Vertex breaks with a 400 if this field be present.
+						if isVertexAI {
+							functionResponse.ID = ""
+						}
 						parts = append(parts, &genai.Part{
-							FunctionResponse: &genai.FunctionResponse{
-								ID:       result.ToolCallID,
-								Response: response,
-								Name:     toolCall.ToolName,
-							},
+							FunctionResponse: functionResponse,
 						})
 
 					case fantasy.ToolResultContentTypeError:
@@ -520,12 +532,18 @@ func toGooglePrompt(prompt fantasy.Prompt) (*genai.Content, []*genai.Content, []
 							continue
 						}
 						response := map[string]any{"result": content.Error.Error()}
+						functionResponse := &genai.FunctionResponse{
+							ID:       result.ToolCallID,
+							Response: response,
+							Name:     toolCall.ToolName,
+						}
+
+						// Vertex breaks with a 400 if this field be present.
+						if isVertexAI {
+							functionResponse.ID = ""
+						}
 						parts = append(parts, &genai.Part{
-							FunctionResponse: &genai.FunctionResponse{
-								ID:       result.ToolCallID,
-								Response: response,
-								Name:     toolCall.ToolName,
-							},
+							FunctionResponse: functionResponse,
 						})
 					}
 				}
@@ -829,7 +847,7 @@ func (g *languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.
 
 			// we need to make sure that there is actual tokendata
 			if resp.UsageMetadata != nil && resp.UsageMetadata.TotalTokenCount != 0 {
-				currentUsage := mapUsage(resp.UsageMetadata)
+				currentUsage := g.mapUsage(resp.UsageMetadata)
 				// if first usage chunk
 				if usage == nil {
 					usage = &currentUsage
@@ -1107,7 +1125,7 @@ func (g *languageModel) streamObjectWithJSONMode(ctx context.Context, call fanta
 
 			// we need to make sure that there is actual tokendata
 			if resp.UsageMetadata != nil && resp.UsageMetadata.TotalTokenCount != 0 {
-				currentUsage := mapUsage(resp.UsageMetadata)
+				currentUsage := g.mapUsage(resp.UsageMetadata)
 				if usage == nil {
 					usage = &currentUsage
 				} else {
@@ -1341,12 +1359,15 @@ func (g languageModel) mapResponse(response *genai.GenerateContentResponse, warn
 							if !ok {
 								continue
 							}
-							reasoningContent.ProviderMetadata = fantasy.ProviderMetadata{
-								Name: metadata,
+							// Only use it if it doesn't already have a signature!
+							if reasoningContent.ProviderMetadata == nil || reasoningContent.ProviderMetadata[Name] == nil {
+								reasoningContent.ProviderMetadata = fantasy.ProviderMetadata{
+									Name: metadata,
+								}
+								content[i] = reasoningContent
+								foundReasoning = true
+								break
 							}
-							content[i] = reasoningContent
-							foundReasoning = true
-							break
 						}
 					}
 					if !foundReasoning {
@@ -1416,7 +1437,7 @@ func (g languageModel) mapResponse(response *genai.GenerateContentResponse, warn
 
 	return &fantasy.Response{
 		Content:      content,
-		Usage:        mapUsage(response.UsageMetadata),
+		Usage:        g.mapUsage(response.UsageMetadata),
 		FinishReason: finishReason,
 		Warnings:     warnings,
 	}, nil
@@ -1455,12 +1476,42 @@ func mapFinishReason(reason genai.FinishReason) fantasy.FinishReason {
 	}
 }
 
-func mapUsage(usage *genai.GenerateContentResponseUsageMetadata) fantasy.Usage {
+// mapUsage maps Google's usage metadata to fantasy usage.
+//
+// Output tokens always include thoughts: downstream pricing never itemizes
+// reasoning, so a surface that reports thoughts disjointly must be folded in
+// here. Whether candidatesTokenCount already contains thoughtsTokenCount
+// depends on the surface — AI Studio folds them in, Vertex reports them
+// apart, and preview models have flipped between the two — so the totals
+// decide per response:
+//
+//	prompt + candidates == total            → candidates already include thoughts
+//	prompt + candidates + thoughts == total → thoughts are disjoint; add them
+//
+// toolUsePromptTokenCount counts as prompt in both sums. When neither
+// equality holds (partial metadata), fall back to the backend's documented
+// behavior: Vertex disjoint, AI Studio inclusive.
+func (g languageModel) mapUsage(usage *genai.GenerateContentResponseUsageMetadata) fantasy.Usage {
+	output := int64(usage.CandidatesTokenCount)
+	reasoning := int64(usage.ThoughtsTokenCount)
+	if reasoning > 0 {
+		prompt := int64(usage.PromptTokenCount) + int64(usage.ToolUsePromptTokenCount)
+		total := int64(usage.TotalTokenCount)
+		switch {
+		case prompt+output == total:
+			// Candidates already include thoughts (AI Studio).
+		case prompt+output+reasoning == total:
+			// Thoughts are reported disjointly (Vertex).
+			output += reasoning
+		case g.providerOptions.backend == genai.BackendVertexAI:
+			output += reasoning
+		}
+	}
 	return fantasy.Usage{
 		InputTokens:         int64(usage.PromptTokenCount),
-		OutputTokens:        int64(usage.CandidatesTokenCount),
+		OutputTokens:        output,
 		TotalTokens:         int64(usage.TotalTokenCount),
-		ReasoningTokens:     int64(usage.ThoughtsTokenCount),
+		ReasoningTokens:     reasoning,
 		CacheCreationTokens: 0,
 		CacheReadTokens:     int64(usage.CachedContentTokenCount),
 	}

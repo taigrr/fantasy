@@ -15,9 +15,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/taigrr/fantasy"
-	"github.com/taigrr/fantasy/providers/anthropic"
-	"github.com/taigrr/fantasy/providers/openai"
+	"charm.land/fantasy"
+	"charm.land/fantasy/providers/anthropic"
+	"charm.land/fantasy/providers/openai"
 )
 
 func main() {
@@ -52,7 +52,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	agent := fantasy.NewAgent(model,
+	agent := fantasy.NewAgent(
+		model,
 		fantasy.WithProviderDefinedTools(webSearch),
 	)
 

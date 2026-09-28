@@ -122,6 +122,7 @@ func GenerateWithTool(
 		PresencePenalty:  call.PresencePenalty,
 		FrequencyPenalty: call.FrequencyPenalty,
 		UserAgent:        call.UserAgent,
+		Headers:          call.Headers,
 		ProviderOptions:  call.ProviderOptions,
 	})
 	if err != nil {
@@ -215,6 +216,7 @@ func GenerateWithText(
 		PresencePenalty:  call.PresencePenalty,
 		FrequencyPenalty: call.FrequencyPenalty,
 		UserAgent:        call.UserAgent,
+		Headers:          call.Headers,
 		ProviderOptions:  call.ProviderOptions,
 	})
 	if err != nil {
@@ -298,6 +300,7 @@ func StreamWithTool(
 		PresencePenalty:  call.PresencePenalty,
 		FrequencyPenalty: call.FrequencyPenalty,
 		UserAgent:        call.UserAgent,
+		Headers:          call.Headers,
 		ProviderOptions:  call.ProviderOptions,
 	})
 	if err != nil {
@@ -508,6 +511,7 @@ func StreamWithText(
 		PresencePenalty:  call.PresencePenalty,
 		FrequencyPenalty: call.FrequencyPenalty,
 		UserAgent:        call.UserAgent,
+		Headers:          call.Headers,
 		ProviderOptions:  call.ProviderOptions,
 	})
 	if err != nil {

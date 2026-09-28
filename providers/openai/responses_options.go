@@ -3,7 +3,9 @@ package openai
 
 import (
 	"encoding/json"
+	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/taigrr/fantasy"
 )
@@ -52,6 +54,22 @@ func init() {
 // The ResponseID can be used as PreviousResponseID in follow-up requests to chain responses.
 type ResponsesProviderMetadata struct {
 	ResponseID string `json:"response_id"`
+	// ExtraFields holds non-standard response fields, including any
+	// captured via [LanguageModelHeaderFunc].
+	ExtraFields map[string]json.RawMessage `json:"extra_fields,omitempty"`
+}
+
+// ExtraField unmarshals the extra field with the given key, if present,
+// into target.
+func (m *ResponsesProviderMetadata) ExtraField(key string, target any) bool {
+	if m == nil || m.ExtraFields == nil {
+		return false
+	}
+	raw, ok := m.ExtraFields[key]
+	if !ok {
+		return false
+	}
+	return json.Unmarshal(raw, target) == nil
 }
 
 var _ fantasy.ProviderOptionsData = (*ResponsesProviderMetadata)(nil)
@@ -221,10 +239,17 @@ var responsesReasoningModelIDs = []string{
 	"gpt-5.4-codex",
 	"gpt-5.5",
 	"gpt-5.5-pro",
+	"gpt-5.5-mini",
+	"gpt-5.5-nano",
+	"gpt-5.5-codex",
 	"gpt-5.6",
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
+	"gpt-5.6-pro",
+	"gpt-5.6-mini",
+	"gpt-5.6-nano",
+	"gpt-5.6-codex",
 	"gpt-oss-120b",
 }
 
@@ -274,14 +299,22 @@ func ParseResponsesOptions(data map[string]any) (*ResponsesProviderOptions, erro
 	return &options, nil
 }
 
+// responsesGenerationPattern matches the model generations that only
+// speak the Responses API: gpt-4 and gpt-5 today, the newer generations
+// as they ship (gpt-6, gpt-10, ...), and never the legacy gpt-3 family
+// that predates it.
+var responsesGenerationPattern = regexp.MustCompile(`gpt-(?:[4-9]|[1-9]\d)`)
+
 // IsResponsesModel checks if a model ID is a Responses API model for OpenAI.
 func IsResponsesModel(modelID string) bool {
-	return slices.Contains(responsesModelIDs, modelID)
+	return slices.Contains(responsesModelIDs, modelID) ||
+		responsesGenerationPattern.MatchString(strings.ToLower(modelID))
 }
 
 // IsResponsesReasoningModel checks if a model ID is a Responses API reasoning model for OpenAI.
 func IsResponsesReasoningModel(modelID string) bool {
-	return slices.Contains(responsesReasoningModelIDs, modelID)
+	return slices.Contains(responsesReasoningModelIDs, modelID) ||
+		responsesGenerationPattern.MatchString(strings.ToLower(modelID))
 }
 
 // SearchContextSize controls how much context window space the

@@ -80,6 +80,7 @@ func TestMessageJSONSerialization(t *testing.T) {
 						Output: ToolResultOutputContentText{
 							Text: "The weather is sunny, 72°F",
 						},
+						ClientMetadata: `{"units":"imperial"}`,
 					},
 				},
 			},
@@ -245,6 +246,9 @@ func compareMessagePart(t *testing.T, index int, original, decoded MessagePart) 
 		if orig.ToolCallID != dec.ToolCallID {
 			t.Errorf("content[%d] tool result call id mismatch: got %q, want %q", index, dec.ToolCallID, orig.ToolCallID)
 		}
+		if orig.ClientMetadata != dec.ClientMetadata {
+			t.Errorf("content[%d] tool result client metadata mismatch: got %q, want %q", index, dec.ClientMetadata, orig.ClientMetadata)
+		}
 		compareToolResultOutput(t, index, orig.Output, dec.Output)
 	}
 }
@@ -311,7 +315,8 @@ func TestHelperFunctions(t *testing.T) {
 	})
 
 	t.Run("NewUserMessage - with files", func(t *testing.T) {
-		msg := NewUserMessage("Check this image",
+		msg := NewUserMessage(
+			"Check this image",
 			FilePart{
 				Filename:  "image1.jpg",
 				Data:      []byte{0xFF, 0xD8, 0xFF},

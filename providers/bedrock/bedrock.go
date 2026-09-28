@@ -6,10 +6,10 @@ import (
 	"context"
 	"os"
 
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/smithy-go/auth/bearer"
-	"github.com/charmbracelet/anthropic-sdk-go/option"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/providers/anthropic"
 )

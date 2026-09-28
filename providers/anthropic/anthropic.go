@@ -11,14 +11,16 @@ import (
 	"io"
 	"maps"
 	"math"
+	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/bedrock"
+	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
+	"github.com/anthropics/anthropic-sdk-go/vertex"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/charmbracelet/anthropic-sdk-go"
-	"github.com/charmbracelet/anthropic-sdk-go/bedrock"
-	"github.com/charmbracelet/anthropic-sdk-go/option"
-	"github.com/charmbracelet/anthropic-sdk-go/packages/param"
-	"github.com/charmbracelet/anthropic-sdk-go/vertex"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/object"
 	"github.com/taigrr/fantasy/providers/internal/httpheaders"
@@ -38,17 +40,97 @@ func betaRequestOptions(flags []string) []option.RequestOption {
 	return opts
 }
 
+func thinkingDisplay(providerOptions *ProviderOptions, modelID string) (ThinkingDisplay, bool) {
+	if providerOptions != nil && providerOptions.ThinkingDisplay != nil && *providerOptions.ThinkingDisplay != "" {
+		return *providerOptions.ThinkingDisplay, true
+	}
+	if defaultsToOmittedThinkingDisplay(modelID) {
+		return ThinkingDisplaySummarized, true
+	}
+	return "", false
+}
+
+func defaultsToAdaptiveThinking(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(model, "claude-mythos-preview")
+}
+
+// requiresAdaptiveThinking reports whether the model rejects a manual
+// budget_tokens configuration and must be sent adaptive thinking instead.
+func requiresAdaptiveThinking(model string) bool {
+	return defaultsToAdaptiveThinking(model) || defaultsToOmittedOpusThinkingDisplay(model)
+}
+
+func setThinkingDisplay(param interface{ SetExtraFields(map[string]any) }, display ThinkingDisplay) {
+	param.SetExtraFields(map[string]any{"display": string(display)})
+}
+
+// omittedThinkingDisplayFamilies are the model families that default to
+// display "omitted". Matched by substring so dated snapshots and
+// platform-qualified ids resolve the same as the bare alias. Keep in step
+// with the display list in the thinking docs:
+// https://platform.claude.com/docs/en/build-with-claude/thinking#controlling-thinking-display
+var omittedThinkingDisplayFamilies = []string{
+	"claude-opus-5",
+	"claude-sonnet-5",
+	"claude-fable-5",
+	"claude-mythos-5",
+}
+
+// defaultsToOmittedThinkingDisplay reports whether the model returns empty
+// thinking text unless a display is requested. Broader than
+// [requiresAdaptiveThinking] on purpose: a display is accepted alongside
+// either thinking type, so it is safe to list a model here.
+func defaultsToOmittedThinkingDisplay(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if defaultsToAdaptiveThinking(model) || defaultsToOmittedOpusThinkingDisplay(model) {
+		return true
+	}
+	for _, family := range omittedThinkingDisplayFamilies {
+		if strings.Contains(model, family) {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultsToOmittedOpusThinkingDisplay(model string) bool {
+	_, suffix, ok := strings.Cut(model, "claude-opus-4-")
+	if !ok {
+		return false
+	}
+
+	versionEnd := 0
+	for versionEnd < len(suffix) && suffix[versionEnd] >= '0' && suffix[versionEnd] <= '9' {
+		versionEnd++
+	}
+	if versionEnd == 0 || versionEnd > 2 {
+		return false
+	}
+	minor, err := strconv.Atoi(suffix[:versionEnd])
+	return err == nil && minor >= 7
+}
+
 // buildRequestOptions constructs the common request options shared
 // by Generate and Stream: user-agent, raw tool injection, and any
 // beta API flags.
 func buildRequestOptions(call fantasy.Call, rawTools []json.RawMessage, betaFlags []string) []option.RequestOption {
+	providerOptions := &ProviderOptions{}
+	if v, ok := call.ProviderOptions[Name]; ok {
+		providerOptions, _ = v.(*ProviderOptions)
+	}
+
 	reqOpts := callUARequestOptions(call)
+	reqOpts = append(reqOpts, callHeadersRequestOptions(call)...)
 	if len(rawTools) > 0 {
 		// Tools are injected as raw JSON rather than via params.Tools
 		// because the SDK doesn't model beta tool types (e.g. computer
 		// use). If the SDK adds validation that reads params.Tools,
 		// this will need updating.
 		reqOpts = append(reqOpts, option.WithJSONSet("tools", rawTools))
+	}
+	for k, v := range providerOptions.ExtraBody {
+		reqOpts = append(reqOpts, option.WithJSONSet(k, v))
 	}
 	if len(betaFlags) > 0 {
 		reqOpts = append(reqOpts, betaRequestOptions(betaFlags)...)
@@ -242,6 +324,14 @@ func (a *provider) LanguageModel(ctx context.Context, modelID string) (fantasy.L
 			)
 		} else {
 			if cfg, err := config.LoadDefaultConfig(ctx); err == nil {
+				// The upstream Anthropic SDK prioritizes a BearerAuthTokenProvider
+				// over SigV4 credentials. When using AWS SSO, the default config
+				// populates both, causing the SSO bearer token to be sent to
+				// Bedrock, which rejects it ("Invalid API Key format"). Clear
+				// the provider so the SDK falls back to SigV4 signing.
+				// AWS_BEARER_TOKEN_BEDROCK is still honored by bedrock.WithConfig
+				// when the provider is nil.
+				cfg.BearerAuthTokenProvider = nil
 				cfg.Region = cmp.Or(a.options.bedrockRegion, cfg.Region)
 				clientOptions = append(
 					clientOptions,
@@ -316,7 +406,7 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 
 	params.System = systemBlocks
 	params.Messages = messages
-	params.Model = anthropic.Model(a.modelID)
+	params.Model = a.modelID
 	params.MaxTokens = 4096
 
 	if call.MaxOutputTokens != nil {
@@ -339,13 +429,27 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 		params.OutputConfig = anthropic.OutputConfigParam{
 			Effort: anthropic.OutputConfigEffort(effort),
 		}
-		adaptive := anthropic.NewThinkingConfigAdaptiveParam()
+		adaptive := anthropic.ThinkingConfigAdaptiveParam{}
+		if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
+			setThinkingDisplay(&adaptive, display)
+		}
 		params.Thinking.OfAdaptive = &adaptive
 	case providerOptions.Thinking != nil:
 		if providerOptions.Thinking.BudgetTokens == 0 {
 			return nil, nil, nil, nil, &fantasy.Error{Title: "no budget", Message: "thinking requires budget"}
 		}
-		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(providerOptions.Thinking.BudgetTokens)
+		if requiresAdaptiveThinking(a.modelID) {
+			adaptive := anthropic.ThinkingConfigAdaptiveParam{}
+			if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
+				setThinkingDisplay(&adaptive, display)
+			}
+			params.Thinking.OfAdaptive = &adaptive
+		} else {
+			params.Thinking = anthropic.ThinkingConfigParamOfEnabled(providerOptions.Thinking.BudgetTokens)
+			if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
+				setThinkingDisplay(params.Thinking.OfEnabled, display)
+			}
+		}
 		if call.Temperature != nil {
 			params.Temperature = param.Opt[float64]{}
 			warnings = append(warnings, fantasy.CallWarning{
@@ -370,6 +474,12 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 				Details: "TopK is not supported when thinking is enabled",
 			})
 		}
+	case defaultsToAdaptiveThinking(a.modelID):
+		adaptive := anthropic.ThinkingConfigAdaptiveParam{}
+		if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
+			setThinkingDisplay(&adaptive, display)
+		}
+		params.Thinking.OfAdaptive = &adaptive
 	}
 
 	if len(call.Tools) > 0 {
@@ -872,6 +982,7 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 								docBlock := anthropic.NewDocumentBlock(anthropic.Base64PDFSourceParam{
 									Data: base64Encoded,
 								})
+								docBlock.OfDocument.Title = anthropic.String(sanitizeAnthropicDocumentTitle(file.Filename))
 								if cacheControl != nil {
 									docBlock.OfDocument.CacheControl = anthropic.NewCacheControlEphemeralParam()
 								}
@@ -880,10 +991,16 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 								documentBlock := anthropic.NewDocumentBlock(anthropic.PlainTextSourceParam{
 									Data: string(file.Data),
 								})
+								documentBlock.OfDocument.Title = anthropic.String(sanitizeAnthropicDocumentTitle(file.Filename))
 								if cacheControl != nil {
 									documentBlock.OfDocument.CacheControl = anthropic.NewCacheControlEphemeralParam()
 								}
 								anthropicContent = append(anthropicContent, documentBlock)
+							default:
+								warnings = append(warnings, fantasy.CallWarning{
+									Type:    fantasy.CallWarningTypeOther,
+									Message: fmt.Sprintf("file part media type %s not supported", file.MediaType),
+								})
 							}
 						}
 					}
@@ -1192,11 +1309,14 @@ func mapFinishReason(finishReason string) fantasy.FinishReason {
 	switch finishReason {
 	case "end_turn", "pause_turn", "stop_sequence":
 		return fantasy.FinishReasonStop
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
 		return fantasy.FinishReasonLength
 	case "tool_use":
 		return fantasy.FinishReasonToolCalls
-	case "refusal":
+	case "refusal", "content_filtered", "guardrail_intervened":
+		// "refusal" is the native Anthropic safety stop. Bedrock
+		// reports guardrail / content-filter blocks with its own
+		// stop reasons instead, so map those here too.
 		return fantasy.FinishReasonContentFilter
 	default:
 		return fantasy.FinishReasonUnknown
@@ -1362,12 +1482,26 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 			}
 		}
 
+		sawMessageStop := false
+
+		// openToolBlocks holds tool_use blocks announced by content_block_start
+		// but not yet ended. The accumulator cannot serve this: it drops blocks
+		// it could not index, and max_tokens truncation sends no stop event.
+		openToolBlocks := map[int64]*openToolBlock{}
+
 		for stream.Next() {
 			chunk := stream.Current()
 			_ = acc.Accumulate(chunk)
 			switch chunk.Type {
 			case "content_block_start":
 				contentBlockType := chunk.ContentBlock.Type
+				if contentBlockType == "tool_use" || contentBlockType == "server_tool_use" {
+					openToolBlocks[chunk.Index] = &openToolBlock{
+						id:               chunk.ContentBlock.ID,
+						name:             chunk.ContentBlock.Name,
+						providerExecuted: contentBlockType == "server_tool_use",
+					}
+				}
 				switch contentBlockType {
 				case "text":
 					if !yield(fantasy.StreamPart{
@@ -1412,6 +1546,15 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 					}
 				}
 			case "content_block_stop":
+				// Tool blocks end from openToolBlocks so that an accumulator
+				// that dropped the block cannot swallow the call.
+				if open, ok := openToolBlocks[chunk.Index]; ok {
+					delete(openToolBlocks, chunk.Index)
+					if !open.close(acc, chunk.Index, yield) {
+						return
+					}
+					continue
+				}
 				if len(acc.Content)-1 < int(chunk.Index) {
 					continue
 				}
@@ -1441,37 +1584,7 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 						return
 					}
 				case "tool_use":
-					if !yield(fantasy.StreamPart{
-						Type: fantasy.StreamPartTypeToolInputEnd,
-						ID:   contentBlock.ID,
-					}) {
-						return
-					}
-					if !yield(fantasy.StreamPart{
-						Type:          fantasy.StreamPartTypeToolCall,
-						ID:            contentBlock.ID,
-						ToolCallName:  contentBlock.Name,
-						ToolCallInput: string(contentBlock.Input),
-					}) {
-						return
-					}
-				case "server_tool_use":
-					if !yield(fantasy.StreamPart{
-						Type:             fantasy.StreamPartTypeToolInputEnd,
-						ID:               contentBlock.ID,
-						ProviderExecuted: true,
-					}) {
-						return
-					}
-					if !yield(fantasy.StreamPart{
-						Type:             fantasy.StreamPartTypeToolCall,
-						ID:               contentBlock.ID,
-						ToolCallName:     contentBlock.Name,
-						ToolCallInput:    string(contentBlock.Input),
-						ProviderExecuted: true,
-					}) {
-						return
-					}
+					// Handled above, from openToolBlocks.
 				case "web_search_tool_result":
 					// Read search results directly from the ContentBlockUnion
 					// struct fields instead of using AsAny(). The Anthropic SDK's
@@ -1554,55 +1667,134 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 						return
 					}
 				case "input_json_delta":
-					if len(acc.Content)-1 < int(chunk.Index) {
+					// Resolved from openToolBlocks, not the accumulator: the
+					// accumulator drops blocks it could not index, and a
+					// dropped delta silently shortens the tool call.
+					open, ok := openToolBlocks[chunk.Index]
+					if !ok {
 						continue
 					}
-					contentBlock := acc.Content[int(chunk.Index)]
+					open.input.WriteString(chunk.Delta.PartialJSON)
 					if !yield(fantasy.StreamPart{
 						Type:          fantasy.StreamPartTypeToolInputDelta,
-						ID:            contentBlock.ID,
+						ID:            open.id,
 						ToolCallInput: chunk.Delta.PartialJSON,
 					}) {
 						return
 					}
 				}
 			case "message_stop":
+				sawMessageStop = true
+			default:
+				// Catch-all on purpose: Anthropic may add event types and
+				// documents that unknown ones should be handled gracefully.
+				// https://platform.claude.com/docs/en/build-with-claude/streaming
+				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeKeepalive}) {
+					return
+				}
 			}
 		}
 
 		err := stream.Err()
-		if err == nil || errors.Is(err, io.EOF) {
-			// Truncated stream: no terminal message_delta with stop_reason.
-			// Surface as a retryable error.
-			if acc.StopReason == "" {
-				yield(fantasy.StreamPart{
-					Type:  fantasy.StreamPartTypeError,
-					Error: fantasy.NewIncompleteStreamError(),
-				})
-				return
-			}
-			yield(fantasy.StreamPart{
-				Type:         fantasy.StreamPartTypeFinish,
-				ID:           acc.ID,
-				FinishReason: mapFinishReason(string(acc.StopReason)),
-				Usage: fantasy.Usage{
-					InputTokens:         acc.Usage.InputTokens,
-					OutputTokens:        acc.Usage.OutputTokens,
-					TotalTokens:         acc.Usage.InputTokens + acc.Usage.OutputTokens,
-					CacheCreationTokens: acc.Usage.CacheCreationInputTokens,
-					CacheReadTokens:     acc.Usage.CacheReadInputTokens,
-				},
-				ProviderMetadata: fantasy.ProviderMetadata{},
-			})
-			return
-		} else { //nolint: revive
+		if err != nil && !errors.Is(err, io.EOF) {
 			yield(fantasy.StreamPart{
 				Type:  fantasy.StreamPartTypeError,
 				Error: toProviderErr(err),
 			})
 			return
 		}
+
+		// Anthropic's SSE protocol reports the stop_reason in message_delta
+		// and then terminates the message with message_stop. Require both so
+		// a socket close after only one of those signals is retried.
+		if !sawMessageStop || acc.StopReason == "" {
+			err := ctx.Err()
+			if err == nil {
+				err = fantasy.NewIncompleteStreamError()
+			}
+			yield(fantasy.StreamPart{
+				Type:  fantasy.StreamPartTypeError,
+				Error: err,
+			})
+			return
+		}
+
+		// A turn stopped at max_tokens sends no content_block_stop for the
+		// block it was writing. Emit what is still open, truncated arguments
+		// and all, so the call is reported invalid rather than dropped.
+		for _, index := range slices.Sorted(maps.Keys(openToolBlocks)) {
+			open := openToolBlocks[index]
+			if !open.close(acc, index, yield) {
+				return
+			}
+		}
+
+		yield(fantasy.StreamPart{
+			Type:         fantasy.StreamPartTypeFinish,
+			ID:           acc.ID,
+			FinishReason: mapFinishReason(string(acc.StopReason)),
+			Usage: fantasy.Usage{
+				InputTokens:         acc.Usage.InputTokens,
+				OutputTokens:        acc.Usage.OutputTokens,
+				TotalTokens:         acc.Usage.InputTokens + acc.Usage.OutputTokens,
+				CacheCreationTokens: acc.Usage.CacheCreationInputTokens,
+				CacheReadTokens:     acc.Usage.CacheReadInputTokens,
+			},
+			ProviderMetadata: fantasy.ProviderMetadata{},
+		})
 	}, nil
+}
+
+// openToolBlock is a tool_use block announced on the stream but not yet
+// ended. It carries the arguments seen so far so the call can still be
+// reported if no content_block_stop arrives.
+type openToolBlock struct {
+	id               string
+	name             string
+	providerExecuted bool
+	input            strings.Builder
+}
+
+// close emits the end-of-input and tool call parts for the block. It reports
+// whether the consumer wants more parts.
+func (o *openToolBlock) close(acc anthropic.Message, index int64, yield func(fantasy.StreamPart) bool) bool {
+	if !yield(fantasy.StreamPart{
+		Type:             fantasy.StreamPartTypeToolInputEnd,
+		ID:               o.id,
+		ProviderExecuted: o.providerExecuted,
+	}) {
+		return false
+	}
+	return yield(fantasy.StreamPart{
+		Type:             fantasy.StreamPartTypeToolCall,
+		ID:               o.id,
+		ToolCallName:     o.name,
+		ToolCallInput:    o.arguments(acc, index),
+		ProviderExecuted: o.providerExecuted,
+	})
+}
+
+// arguments returns the call's arguments as JSON text. Deltas win; a block
+// with no deltas falls back to the accumulator, then to an empty object so a
+// no-argument call is still valid JSON.
+func (o *openToolBlock) arguments(acc anthropic.Message, index int64) string {
+	if o.input.Len() > 0 {
+		return o.input.String()
+	}
+	// Only trust the accumulator when the block sitting at this index
+	// carries this call's ID. Index drift between the stream and the
+	// accumulator is the very thing this tracking exists to survive, so
+	// reading by position alone would be trusting the one thing already
+	// known to be unreliable, and another call's arguments are worse than
+	// none. A negative index cannot address a block at all.
+	if index >= 0 && int(index) < len(acc.Content) {
+		if block := acc.Content[index]; block.ID == o.id {
+			if input := string(block.Input); input != "" {
+				return input
+			}
+		}
+	}
+	return "{}"
 }
 
 // GenerateObject implements fantasy.LanguageModel.

@@ -7,13 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/openai-go"
+	"github.com/charmbracelet/openai-go/option"
 	"github.com/charmbracelet/openai-go/packages/param"
 	"github.com/charmbracelet/openai-go/shared"
-	xjson "github.com/charmbracelet/x/json"
 	"github.com/google/uuid"
 	"github.com/taigrr/fantasy"
 	"github.com/taigrr/fantasy/object"
@@ -32,6 +35,7 @@ type languageModel struct {
 	streamUsageFunc            LanguageModelStreamUsageFunc
 	streamExtraFunc            LanguageModelStreamExtraFunc
 	streamProviderMetadataFunc LanguageModelStreamProviderMetadataFunc
+	headerFunc                 LanguageModelHeaderFunc
 	toPromptFunc               LanguageModelToPromptFunc
 }
 
@@ -80,6 +84,17 @@ func WithLanguageModelStreamUsageFunc(fn LanguageModelStreamUsageFunc) LanguageM
 	}
 }
 
+// WithLanguageModelHeaderFunc sets the response header function for the
+// language model. When set, the HTTP response headers of each call are
+// captured and passed to the function alongside the provider metadata,
+// which it may mutate (e.g. copying headers of interest into ExtraFields).
+// When unset, response headers are not captured at all.
+func WithLanguageModelHeaderFunc(fn LanguageModelHeaderFunc) LanguageModelOption {
+	return func(l *languageModel) {
+		l.headerFunc = fn
+	}
+}
+
 // WithLanguageModelToPromptFunc sets the to prompt function for the language model.
 func WithLanguageModelToPromptFunc(fn LanguageModelToPromptFunc) LanguageModelOption {
 	return func(l *languageModel) {
@@ -123,6 +138,112 @@ type streamToolCall struct {
 	name        string
 	arguments   string
 	hasFinished bool
+}
+
+// responseCapture holds the raw HTTP response of a call so response headers
+// can be surfaced through provider metadata. Capturing is only enabled when
+// a header func is configured on the language model.
+type responseCapture struct {
+	response *http.Response
+}
+
+// requestOptions returns the given per-call request options with the raw
+// HTTP response capture appended when the given header func is configured.
+func (c *responseCapture) requestOptions(headerFunc LanguageModelHeaderFunc, opts []option.RequestOption) []option.RequestOption {
+	if headerFunc == nil {
+		return opts
+	}
+	return append(opts,
+		option.WithResponseInto(&c.response),
+		option.WithMiddleware(drainOnCloseMiddleware),
+	)
+}
+
+// drainOnCloseMiddleware wraps the response body so that a close before
+// EOF — which the SSE stream does at its [DONE] sentinel — drains the
+// remaining bytes first. net/http parses HTTP trailers only once the body
+// has been read that far, so without the drain a trailer arriving after
+// the stream's terminal event would be discarded.
+func drainOnCloseMiddleware(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+	res, err := next(req)
+	if err != nil || res == nil || res.Body == nil {
+		return res, err
+	}
+	res.Body = &drainOnCloseBody{ReadCloser: res.Body}
+	return res, err
+}
+
+// drainOnCloseBody reads the wrapped body to EOF before closing it.
+type drainOnCloseBody struct {
+	io.ReadCloser
+}
+
+func (b *drainOnCloseBody) Close() error {
+	_, _ = io.Copy(io.Discard, b.ReadCloser)
+	return b.ReadCloser.Close()
+}
+
+// header returns the captured response headers, with any HTTP trailers
+// merged in (trailer keys win on collision), or nil when no response was
+// captured. The header func runs after the response body has been fully
+// consumed, so trailers — which net/http populates only then — are visible.
+func (c *responseCapture) header() http.Header {
+	if c.response == nil {
+		return nil
+	}
+	if len(c.response.Trailer) == 0 {
+		return c.response.Header
+	}
+	merged := c.response.Header.Clone()
+	maps.Copy(merged, c.response.Trailer)
+	return merged
+}
+
+// languageModelHeaderFunc returns the header func configured through the
+// given language model options, if any. It is the only language model
+// option also honored by the responses language model.
+func languageModelHeaderFunc(opts []LanguageModelOption) LanguageModelHeaderFunc {
+	var lm languageModel
+	for _, opt := range opts {
+		opt(&lm)
+	}
+	return lm.headerFunc
+}
+
+// applyHeaders invokes the configured header func against the non-stream
+// provider metadata. It is a no-op when no header func is configured or no
+// response was captured.
+func (o languageModel) applyHeaders(header http.Header, providerMetadata fantasy.ProviderOptionsData) fantasy.ProviderOptionsData {
+	if o.headerFunc == nil || header == nil {
+		return providerMetadata
+	}
+	metadata, ok := providerMetadata.(*ProviderMetadata)
+	if !ok {
+		metadata = &ProviderMetadata{}
+		providerMetadata = metadata
+	}
+	o.headerFunc(header, metadata)
+	return providerMetadata
+}
+
+// applyHeadersStream invokes the configured header func against the stream
+// provider metadata, creating the metadata when the stream carried none.
+// It is a no-op when no header func is configured or no response was
+// captured. It must run once, after the stream loop, because
+// streamUsageFunc replaces the metadata on every chunk.
+func (o languageModel) applyHeadersStream(header http.Header, providerMetadata *fantasy.ProviderMetadata) {
+	if o.headerFunc == nil || header == nil {
+		return
+	}
+	if *providerMetadata == nil {
+		*providerMetadata = fantasy.ProviderMetadata{}
+	}
+	metadata, ok := (*providerMetadata)[Name].(*ProviderMetadata)
+	if !ok {
+		metadata = &ProviderMetadata{}
+		(*providerMetadata)[Name] = metadata
+	}
+	o.headerFunc(header, metadata)
 }
 
 // Model implements fantasy.LanguageModel.
@@ -243,11 +364,12 @@ func (o languageModel) prepareParams(call fantasy.Call) (*openai.ChatCompletionN
 
 // Generate implements fantasy.LanguageModel.
 func (o languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
+	capture := responseCapture{}
 	params, warnings, err := o.prepareParams(call)
 	if err != nil {
 		return nil, err
 	}
-	response, err := o.client.Chat.Completions.New(ctx, *params, callUARequestOptions(call)...)
+	response, err := o.client.Chat.Completions.New(ctx, *params, capture.requestOptions(o.headerFunc, append(callUARequestOptions(call), callHeadersRequestOptions(call)...))...)
 	if err != nil {
 		return nil, toProviderErr(err)
 	}
@@ -270,14 +392,41 @@ func (o languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantas
 		extraContent := o.extraContentFunc(choice)
 		content = append(content, extraContent...)
 	}
-	for _, tc := range choice.Message.ToolCalls {
-		toolCallID := tc.ID
-		content = append(content, fantasy.ToolCallContent{
-			ProviderExecuted: false,
-			ToolCallID:       toolCallID,
-			ToolName:         tc.Function.Name,
-			Input:            tc.Function.Arguments,
+
+	usage, providerMetadata := o.usageFunc(*response)
+	providerMetadata = o.applyHeaders(capture.header(), providerMetadata)
+
+	mappedFinishReason := o.mapFinishReasonFunc(choice.FinishReason)
+	// Terminal reasons that can cut output mid-call — length,
+	// content_filter, provider errors — must not be rewritten into a
+	// tool-call turn: dispatching their partial calls executes truncated
+	// input (CHARM-2020).
+	suppressedToolCalls := len(choice.Message.ToolCalls) > 0 &&
+		(mappedFinishReason == fantasy.FinishReasonLength ||
+			mappedFinishReason == fantasy.FinishReasonContentFilter ||
+			mappedFinishReason == fantasy.FinishReasonError)
+	if len(choice.Message.ToolCalls) > 0 && !suppressedToolCalls {
+		mappedFinishReason = fantasy.FinishReasonToolCalls
+	}
+	if suppressedToolCalls {
+		warnings = append(warnings, fantasy.CallWarning{
+			Type:    fantasy.CallWarningTypeOther,
+			Message: "tool calls were returned but the turn ended abnormally (token limit, content filter, or provider error); arguments may be truncated",
 		})
+	}
+
+	// Suppress truncated tool-call content so agents don't dispatch
+	// calls with incomplete arguments.
+	if !suppressedToolCalls {
+		for _, tc := range choice.Message.ToolCalls {
+			toolCallID := tc.ID
+			content = append(content, fantasy.ToolCallContent{
+				ProviderExecuted: false,
+				ToolCallID:       toolCallID,
+				ToolName:         tc.Function.Name,
+				Input:            tc.Function.Arguments,
+			})
+		}
 	}
 	for _, annotation := range choice.Message.Annotations {
 		if annotation.Type == "url_citation" {
@@ -290,12 +439,6 @@ func (o languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantas
 		}
 	}
 
-	usage, providerMetadata := o.usageFunc(*response)
-
-	mappedFinishReason := o.mapFinishReasonFunc(choice.FinishReason)
-	if len(choice.Message.ToolCalls) > 0 {
-		mappedFinishReason = fantasy.FinishReasonToolCalls
-	}
 	return &fantasy.Response{
 		Content:      content,
 		Usage:        usage,
@@ -309,6 +452,7 @@ func (o languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantas
 
 // Stream implements fantasy.LanguageModel.
 func (o languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	capture := responseCapture{}
 	params, warnings, err := o.prepareParams(call)
 	if err != nil {
 		return nil, err
@@ -318,7 +462,7 @@ func (o languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 		IncludeUsage: openai.Bool(true),
 	}
 
-	stream := o.client.Chat.Completions.NewStreaming(ctx, *params, callUARequestOptions(call)...)
+	stream := o.client.Chat.Completions.NewStreaming(ctx, *params, capture.requestOptions(o.headerFunc, append(callUARequestOptions(call), callHeadersRequestOptions(call)...))...)
 	isActiveText := false
 	toolCalls := make(map[int64]streamToolCall)
 
@@ -345,12 +489,25 @@ func (o languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 			if len(chunk.Choices) == 0 {
 				continue
 			}
+			// The extra hook receives the whole chunk and iterates choices
+			// itself; calling it per choice would duplicate its events once
+			// per additional choice. It must run before the content/tool
+			// loop: when a batching host puts the reasoning tail and the
+			// first content/tool-call token in the same delta, the reasoning
+			// belongs before that content — yielding it after inverts the
+			// part order and breaks block-based consumers.
+			if o.streamExtraFunc != nil {
+				updatedContext, shouldContinue := o.streamExtraFunc(chunk, yield, extraContext)
+				if !shouldContinue {
+					return
+				}
+				extraContext = updatedContext
+			}
 			for _, choice := range chunk.Choices {
 				if choice.FinishReason != "" {
 					finishReason = choice.FinishReason
 				}
-				switch {
-				case choice.Delta.Content != "":
+				if choice.Delta.Content != "" {
 					if !isActiveText {
 						isActiveText = true
 						if !yield(fantasy.StreamPart{
@@ -367,7 +524,8 @@ func (o languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 					}) {
 						return
 					}
-				case len(choice.Delta.ToolCalls) > 0:
+				}
+				if len(choice.Delta.ToolCalls) > 0 {
 					if isActiveText {
 						isActiveText = false
 						if !yield(fantasy.StreamPart{
@@ -380,39 +538,17 @@ func (o languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 
 					for _, toolCallDelta := range choice.Delta.ToolCalls {
 						if existingToolCall, ok := toolCalls[toolCallDelta.Index]; ok {
-							if existingToolCall.hasFinished {
-								continue
-							}
 							if toolCallDelta.Function.Arguments != "" {
 								existingToolCall.arguments += toolCallDelta.Function.Arguments
-							}
-							if !yield(fantasy.StreamPart{
-								Type:  fantasy.StreamPartTypeToolInputDelta,
-								ID:    existingToolCall.id,
-								Delta: toolCallDelta.Function.Arguments,
-							}) {
-								return
+								if !yield(fantasy.StreamPart{
+									Type:  fantasy.StreamPartTypeToolInputDelta,
+									ID:    existingToolCall.id,
+									Delta: toolCallDelta.Function.Arguments,
+								}) {
+									return
+								}
 							}
 							toolCalls[toolCallDelta.Index] = existingToolCall
-							if xjson.IsValid(existingToolCall.arguments) {
-								if !yield(fantasy.StreamPart{
-									Type: fantasy.StreamPartTypeToolInputEnd,
-									ID:   existingToolCall.id,
-								}) {
-									return
-								}
-
-								if !yield(fantasy.StreamPart{
-									Type:          fantasy.StreamPartTypeToolCall,
-									ID:            existingToolCall.id,
-									ToolCallName:  existingToolCall.name,
-									ToolCallInput: existingToolCall.arguments,
-								}) {
-									return
-								}
-								existingToolCall.hasFinished = true
-								toolCalls[toolCallDelta.Index] = existingToolCall
-							}
 						} else {
 							// Some provider like Ollama may send empty tool calls or miss some fields.
 							// We'll skip when we don't have enough info and also assume sane defaults.
@@ -443,49 +579,20 @@ func (o languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 								arguments: toolCallDelta.Function.Arguments,
 							}
 
-							exTc := toolCalls[toolCallDelta.Index]
-							if exTc.arguments != "" {
+							if toolCallDelta.Function.Arguments != "" {
 								if !yield(fantasy.StreamPart{
 									Type:  fantasy.StreamPartTypeToolInputDelta,
-									ID:    exTc.id,
-									Delta: exTc.arguments,
+									ID:    toolCallDelta.ID,
+									Delta: toolCallDelta.Function.Arguments,
 								}) {
 									return
-								}
-								if xjson.IsValid(toolCalls[toolCallDelta.Index].arguments) {
-									if !yield(fantasy.StreamPart{
-										Type: fantasy.StreamPartTypeToolInputEnd,
-										ID:   exTc.id,
-									}) {
-										return
-									}
-
-									if !yield(fantasy.StreamPart{
-										Type:          fantasy.StreamPartTypeToolCall,
-										ID:            exTc.id,
-										ToolCallName:  exTc.name,
-										ToolCallInput: exTc.arguments,
-									}) {
-										return
-									}
-									exTc.hasFinished = true
-									toolCalls[toolCallDelta.Index] = exTc
 								}
 							}
 							continue
 						}
 					}
 				}
-
-				if o.streamExtraFunc != nil {
-					updatedContext, shouldContinue := o.streamExtraFunc(chunk, yield, extraContext)
-					if !shouldContinue {
-						return
-					}
-					extraContext = updatedContext
-				}
 			}
-
 			for _, choice := range chunk.Choices {
 				if annotations := parseAnnotationsFromDelta(choice.Delta); len(annotations) > 0 {
 					for _, annotation := range annotations {
@@ -516,24 +623,83 @@ func (o languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 				}
 			}
 
-			// Handle tool calls that finish with empty arguments (e.g., Copilot).
-			// Normalize empty args to "{}" and emit the tool call.
-			// If the arguments are invalid JSON, we still yield the tool call
-			// so the consumer (agent) can handle the error rather than
-			// silently dropping it.
-			for idx, tc := range toolCalls {
-				if tc.hasFinished {
-					continue
+			// Evaluate the finish reason before emitting tool calls so we can
+			// suppress them when the response was truncated (finish_reason=length).
+			// Emitting partial tool calls causes agents to dispatch them with
+			// invalid arguments before seeing the terminal reason.
+			mappedFinishReason := o.mapFinishReasonFunc(finishReason)
+
+			// "Tool calls were seen" is not proof of a complete turn. Infer a
+			// tool-call turn only when the upstream said tool_calls/function_call
+			// explicitly (kept verbatim by the mapper) or sent no finish reason
+			// at all and every accumulated call's arguments parse as complete
+			// JSON. Terminal reasons that can cut output mid-call — length,
+			// content_filter, provider errors — must never be rewritten into a
+			// tool-call turn: dispatching their partial calls executes truncated
+			// input (CHARM-2020).
+			var missingFinishWithBadArgs bool
+			var missingFinish bool
+			if finishReason == "" && len(toolCalls) > 0 {
+				missingFinish = true
+				for _, tc := range toolCalls {
+					// A call with no arguments was cut before any argument
+					// arrived; filling in "{}" would invent arguments the model
+					// never sent.
+					if tc.arguments == "" || !json.Valid([]byte(tc.arguments)) {
+						missingFinishWithBadArgs = true
+						break
+					}
 				}
-				if tc.arguments == "" {
-					tc.arguments = "{}"
-					toolCalls[idx] = tc
+			}
+
+			if finishReason == "" && len(acc.Choices) > 0 && !missingFinishWithBadArgs {
+				if len(acc.Choices[0].Message.ToolCalls) > 0 {
+					mappedFinishReason = fantasy.FinishReasonToolCalls
 				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputEnd, ID: tc.id}) {
-					return
+			}
+			suppressedWithToolCalls := (mappedFinishReason == fantasy.FinishReasonLength ||
+				mappedFinishReason == fantasy.FinishReasonError ||
+				mappedFinishReason == fantasy.FinishReasonContentFilter ||
+				missingFinishWithBadArgs) && len(toolCalls) > 0
+
+			// A cut stream with unusable partial calls errors out before the
+			// finalizer runs: emitting ToolInputEnd after backfilling "{}" would
+			// present fabricated completed input to consumers (CHARM-2020).
+			if missingFinishWithBadArgs {
+				err := ctx.Err()
+				if err == nil {
+					err = fantasy.NewIncompleteStreamError()
 				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: tc.id, ToolCallName: tc.name, ToolCallInput: tc.arguments}) {
-					return
+				yield(fantasy.StreamPart{
+					Type:  fantasy.StreamPartTypeError,
+					Error: err,
+				})
+				return
+			}
+
+			// Finalize tool calls in index order after the stream completes.
+			// When truncated, skip ToolCall parts to prevent agents from
+			// dispatching calls with incomplete arguments.
+			indices := make([]int64, 0, len(toolCalls))
+			for idx := range toolCalls {
+				indices = append(indices, idx)
+			}
+			slices.Sort(indices)
+			for _, idx := range indices {
+				tc := toolCalls[idx]
+				if !tc.hasFinished {
+					if tc.arguments == "" {
+						tc.arguments = "{}"
+						toolCalls[idx] = tc
+					}
+					if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputEnd, ID: tc.id}) {
+						return
+					}
+				}
+				if !suppressedWithToolCalls {
+					if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: tc.id, ToolCallName: tc.name, ToolCallInput: tc.arguments}) {
+						return
+					}
 				}
 				tc.hasFinished = true
 				toolCalls[idx] = tc
@@ -557,23 +723,39 @@ func (o languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 					}
 				}
 			}
-			mappedFinishReason := o.mapFinishReasonFunc(finishReason)
-			if len(acc.Choices) > 0 {
-				choice := acc.Choices[0]
-				if len(choice.Message.ToolCalls) > 0 {
-					mappedFinishReason = fantasy.FinishReasonToolCalls
-				}
-			}
 			// Truncated stream: upstream closed without finish_reason and we
 			// can't infer a tool-call turn. Surface as a retryable error so
 			// the retry middleware re-runs the step.
 			if finishReason == "" && mappedFinishReason != fantasy.FinishReasonToolCalls {
+				err := ctx.Err()
+				if err == nil {
+					err = fantasy.NewIncompleteStreamError()
+				}
 				yield(fantasy.StreamPart{
 					Type:  fantasy.StreamPartTypeError,
-					Error: fantasy.NewIncompleteStreamError(),
+					Error: err,
 				})
 				return
 			}
+			if missingFinish && !missingFinishWithBadArgs {
+				yield(fantasy.StreamPart{
+					Type: fantasy.StreamPartTypeWarnings,
+					Warnings: []fantasy.CallWarning{{
+						Type:    fantasy.CallWarningTypeOther,
+						Message: "stream ended without finish_reason; assuming tool-call turn",
+					}},
+				})
+			}
+			if suppressedWithToolCalls && !missingFinishWithBadArgs {
+				yield(fantasy.StreamPart{
+					Type: fantasy.StreamPartTypeWarnings,
+					Warnings: []fantasy.CallWarning{{
+						Type:    fantasy.CallWarningTypeOther,
+						Message: "tool calls were returned but the turn ended abnormally (token limit, content filter, or provider error); arguments may be truncated",
+					}},
+				})
+			}
+			o.applyHeadersStream(capture.header(), &providerMetadata)
 			yield(fantasy.StreamPart{
 				Type:             fantasy.StreamPartTypeFinish,
 				Usage:            usage,
@@ -596,7 +778,7 @@ func isReasoningModel(modelID string) bool {
 		strings.HasPrefix(modelID, "o3") || strings.Contains(modelID, "-o3") ||
 		strings.HasPrefix(modelID, "o4") || strings.Contains(modelID, "-o4") ||
 		strings.HasPrefix(modelID, "oss") || strings.Contains(modelID, "-oss") ||
-		strings.Contains(modelID, "gpt-5") || strings.Contains(modelID, "gpt-5-chat")
+		strings.Contains(strings.ToLower(modelID), "gpt-5")
 }
 
 func isSearchPreviewModel(modelID string) bool {
@@ -605,13 +787,16 @@ func isSearchPreviewModel(modelID string) bool {
 
 func supportsFlexProcessing(modelID string) bool {
 	return strings.HasPrefix(modelID, "o3") || strings.Contains(modelID, "-o3") ||
-		strings.Contains(modelID, "o4-mini") || strings.Contains(modelID, "gpt-5")
+		strings.Contains(modelID, "o4-mini") ||
+		strings.Contains(strings.ToLower(modelID), "gpt-5")
 }
 
 func supportsPriorityProcessing(modelID string) bool {
-	return strings.Contains(modelID, "gpt-4") || strings.Contains(modelID, "gpt-5") ||
-		strings.Contains(modelID, "gpt-5-mini") || strings.HasPrefix(modelID, "o3") ||
-		strings.Contains(modelID, "-o3") || strings.Contains(modelID, "o4-mini")
+	return strings.Contains(strings.ToLower(modelID), "gpt-4") ||
+		strings.Contains(strings.ToLower(modelID), "gpt-5") ||
+		strings.HasPrefix(modelID, "o3") ||
+		strings.Contains(modelID, "-o3") ||
+		strings.Contains(modelID, "o4-mini")
 }
 
 func toOpenAiTools(tools []fantasy.Tool, toolChoice *fantasy.ToolChoice) (openAiTools []openai.ChatCompletionToolUnionParam, openAiToolChoice *openai.ChatCompletionToolChoiceOptionUnionParam, warnings []fantasy.CallWarning) {
@@ -768,7 +953,7 @@ func (o languageModel) generateObjectWithJSONMode(ctx context.Context, call fant
 		},
 	}
 
-	response, err := o.client.Chat.Completions.New(ctx, *params, objectCallUARequestOptions(call)...)
+	response, err := o.client.Chat.Completions.New(ctx, *params, append(objectCallUARequestOptions(call), objectCallHeadersRequestOptions(call)...)...)
 	if err != nil {
 		return nil, toProviderErr(err)
 	}
@@ -852,7 +1037,7 @@ func (o languageModel) streamObjectWithJSONMode(ctx context.Context, call fantas
 		IncludeUsage: openai.Bool(true),
 	}
 
-	stream := o.client.Chat.Completions.NewStreaming(ctx, *params, objectCallUARequestOptions(call)...)
+	stream := o.client.Chat.Completions.NewStreaming(ctx, *params, append(objectCallUARequestOptions(call), objectCallHeadersRequestOptions(call)...)...)
 
 	return func(yield func(fantasy.ObjectStreamPart) bool) {
 		if len(warnings) > 0 {
@@ -868,8 +1053,8 @@ func (o languageModel) streamObjectWithJSONMode(ctx context.Context, call fantas
 		var lastParsedObject any
 		var usage fantasy.Usage
 		var finishReason fantasy.FinishReason
+		var sawFinishReason bool
 		var providerMetadata fantasy.ProviderMetadata
-		var streamErr error
 
 		for stream.Next() {
 			chunk := stream.Current()
@@ -884,6 +1069,7 @@ func (o languageModel) streamObjectWithJSONMode(ctx context.Context, call fantas
 			choice := chunk.Choices[0]
 			if choice.FinishReason != "" {
 				finishReason = o.mapFinishReasonFunc(choice.FinishReason)
+				sawFinishReason = true
 			}
 
 			if choice.Delta.Content != "" {
@@ -928,10 +1114,21 @@ func (o languageModel) streamObjectWithJSONMode(ctx context.Context, call fantas
 
 		err := stream.Err()
 		if err != nil && !errors.Is(err, io.EOF) {
-			streamErr = toProviderErr(err)
 			yield(fantasy.ObjectStreamPart{
 				Type:  fantasy.ObjectStreamPartTypeError,
-				Error: streamErr,
+				Error: toProviderErr(err),
+			})
+			return
+		}
+
+		if !sawFinishReason {
+			err := ctx.Err()
+			if err == nil {
+				err = fantasy.NewIncompleteStreamError()
+			}
+			yield(fantasy.ObjectStreamPart{
+				Type:  fantasy.ObjectStreamPartTypeError,
+				Error: err,
 			})
 			return
 		}

@@ -5,15 +5,15 @@ go 1.27.0
 require (
 	charm.land/x/vcr v0.1.1
 	cloud.google.com/go/auth v0.23.2
+	github.com/anthropics/anthropic-sdk-go v1.68.0
 	github.com/ardanlabs/kronk v1.32.7
 	github.com/aws/aws-sdk-go-v2 v1.47.0
 	github.com/aws/aws-sdk-go-v2/config v1.33.5
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.5
 	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.50.5
 	github.com/aws/smithy-go v1.28.1
-	github.com/charmbracelet/anthropic-sdk-go v0.0.0-20260223140439-63879b0b8dab
-	github.com/charmbracelet/openai-go v0.0.0-20260319145158-d0740cc34266
-	github.com/charmbracelet/x/exp/slice v0.0.0-20260720091843-3eef36eaaa28
+	github.com/charmbracelet/openai-go v0.0.0-20260921175203-216db9e71b83
+	github.com/charmbracelet/x/exp/slice v0.1.0
 	github.com/charmbracelet/x/exp/strings v0.1.0
 	github.com/charmbracelet/x/json v0.2.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
@@ -35,8 +35,6 @@ require (
 	cloud.google.com/go/iam v1.13.0 // indirect
 	cloud.google.com/go/monitoring v1.30.0 // indirect
 	cloud.google.com/go/storage v1.68.0 // indirect
-	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.17.0 // indirect
-	github.com/Azure/azure-sdk-for-go/sdk/internal v1.10.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.38.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.62.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.62.0 // indirect
@@ -55,11 +53,14 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0 // indirect
+	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
+	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/ebitengine/purego v0.11.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.39.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
@@ -79,18 +80,21 @@ require (
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-getter v1.8.9 // indirect
 	github.com/hashicorp/go-version v1.9.0 // indirect
+	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/jupiterrider/ffi v0.7.0 // indirect
 	github.com/kaptinlin/jsonpointer v0.4.28 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/prometheus/client_golang v1.24.1 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.71.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.8.1 // indirect
-	github.com/tidwall/gjson v1.18.0 // indirect
+	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
+	github.com/tidwall/gjson v1.19.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect

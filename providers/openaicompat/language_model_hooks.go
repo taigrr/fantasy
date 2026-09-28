@@ -13,7 +13,27 @@ import (
 	"github.com/taigrr/fantasy/providers/openai"
 )
 
-const reasoningStartedCtx = "reasoning_started"
+const (
+	reasoningStartedCtx = "reasoning_started"
+	reasoningEndedCtx   = "reasoning_ended"
+)
+
+// buildTextBlock creates a text content block, applying any provider-specific extra
+// fields (e.g. Qwen's cache_control) onto it. Part-level fields override message-level
+// fields. Returns the block and whether any extra fields were applied; when they were,
+// the message content must be serialized in array form.
+func buildTextBlock(text string, partOpts, msgOpts fantasy.ProviderOptions) (*openaisdk.ChatCompletionContentPartTextParam, bool) {
+	block := &openaisdk.ChatCompletionContentPartTextParam{Text: text}
+	fields := getContentExtraFields(partOpts)
+	if len(fields) == 0 {
+		fields = getContentExtraFields(msgOpts)
+	}
+	if len(fields) > 0 {
+		block.SetExtraFields(fields)
+		return block, true
+	}
+	return block, false
+}
 
 // PrepareCallFunc prepares the call for the language model.
 func PrepareCallFunc(model fantasy.LanguageModel, params *openaisdk.ChatCompletionNewParams, call fantasy.Call) ([]fantasy.CallWarning, error) {
@@ -39,6 +59,8 @@ func PrepareCallFunc(model fantasy.LanguageModel, params *openaisdk.ChatCompleti
 			params.ReasoningEffort = shared.ReasoningEffortHigh
 		case openai.ReasoningEffortXHigh:
 			params.ReasoningEffort = shared.ReasoningEffortXhigh
+		case openai.ReasoningEffortMax:
+			params.ReasoningEffort = shared.ReasoningEffortMax
 		default:
 			return nil, fmt.Errorf("reasoning model `%s` not supported", *providerOptions.ReasoningEffort)
 		}
@@ -61,20 +83,20 @@ func ExtraContentFunc(choice openaisdk.ChatCompletionChoice) []fantasy.Content {
 	if err != nil {
 		return content
 	}
-	if rc := reasoningData.GetReasoningContent(); rc != "" {
+	if hasReasoningField(choice.Message.RawJSON()) {
 		content = append(content, fantasy.ReasoningContent{
-			Text: rc,
+			Text: reasoningData.GetReasoningContent(),
 		})
 	}
 	return content
 }
 
-func extractReasoningContext(ctx map[string]any) bool {
-	reasoningStarted, ok := ctx[reasoningStartedCtx]
+func ctxBool(ctx map[string]any, key string) bool {
+	v, ok := ctx[key]
 	if !ok {
 		return false
 	}
-	b, ok := reasoningStarted.(bool)
+	b, ok := v.(bool)
 	if !ok {
 		return false
 	}
@@ -87,9 +109,17 @@ func StreamExtraFunc(chunk openaisdk.ChatCompletionChunk, yield func(fantasy.Str
 		return ctx, true
 	}
 
-	reasoningStarted := extractReasoningContext(ctx)
+	for _, choice := range chunk.Choices {
+		// Reasoning state is tracked per choice: the openai language model
+		// invokes this hook once per chunk, a chunk may carry several
+		// choices, and providers may emit them in any slice order — key on
+		// the choice's own Index, not its position in the chunk.
+		inx := choice.Index
+		startedKey := fmt.Sprintf("%s:%d", reasoningStartedCtx, inx)
+		endedKey := fmt.Sprintf("%s:%d", reasoningEndedCtx, inx)
+		reasoningStarted := ctxBool(ctx, startedKey)
+		reasoningEnded := ctxBool(ctx, endedKey)
 
-	for inx, choice := range chunk.Choices {
 		reasoningData := ReasoningData{}
 		err := json.Unmarshal([]byte(choice.Delta.RawJSON()), &reasoningData)
 		if err != nil {
@@ -100,35 +130,54 @@ func StreamExtraFunc(chunk openaisdk.ChatCompletionChunk, yield func(fantasy.Str
 			return ctx, false
 		}
 
-		emitEvent := func(reasoningContent string) bool {
+		rc := reasoningData.GetReasoningContent()
+		hasField := hasReasoningField(choice.Delta.RawJSON())
+		boundary := choice.Delta.Content != "" || len(choice.Delta.ToolCalls) > 0 || choice.FinishReason != ""
+
+		// A reasoning delta carries non-empty reasoning text, or a
+		// present-but-empty field on a chunk that carries nothing else before
+		// any block was closed (Kimi's "thinking on, nothing to think"
+		// shape). A boundary chunk whose reasoning field is empty/null is
+		// never reasoning.
+		if rc != "" || (hasField && !boundary && !reasoningEnded) {
 			if !reasoningStarted {
-				shouldContinue := yield(fantasy.StreamPart{
+				reasoningStarted = true
+				ctx[startedKey] = true
+				if !yield(fantasy.StreamPart{
 					Type: fantasy.StreamPartTypeReasoningStart,
 					ID:   fmt.Sprintf("%d", inx),
-				})
-				if !shouldContinue {
-					return false
+				}) {
+					return ctx, false
 				}
 			}
-
-			return yield(fantasy.StreamPart{
-				Type:  fantasy.StreamPartTypeReasoningDelta,
-				ID:    fmt.Sprintf("%d", inx),
-				Delta: reasoningContent,
-			})
-		}
-		if rc := reasoningData.GetReasoningContent(); rc != "" {
-			if !reasoningStarted {
-				ctx[reasoningStartedCtx] = true
+			// Skip empty deltas: a present-but-empty field opens the block so
+			// it replays as reasoning_content: "", but there is nothing to
+			// stream.
+			if rc != "" {
+				if !yield(fantasy.StreamPart{
+					Type:  fantasy.StreamPartTypeReasoningDelta,
+					ID:    fmt.Sprintf("%d", inx),
+					Delta: rc,
+				}) {
+					return ctx, false
+				}
 			}
-			return ctx, emitEvent(rc)
+			// Fall through: a batching host may put the reasoning tail and the
+			// first content/tool-call token in the same delta.
 		}
-		if reasoningStarted && (choice.Delta.Content != "" || len(choice.Delta.ToolCalls) > 0) {
-			ctx[reasoningStartedCtx] = false
-			return ctx, yield(fantasy.StreamPart{
+		if reasoningStarted && boundary {
+			ctx[startedKey] = false
+			ctx[endedKey] = true
+			// The openai main loop runs this hook before emitting a chunk's
+			// text/tool-call parts, so on a batched boundary chunk the part order
+			// is ReasoningDelta(tail), ReasoningEnd, then the content/tool parts:
+			// the reasoning in that delta semantically precedes the content.
+			if !yield(fantasy.StreamPart{
 				Type: fantasy.StreamPartTypeReasoningEnd,
 				ID:   fmt.Sprintf("%d", inx),
-			})
+			}) {
+				return ctx, false
+			}
 		}
 	}
 	return ctx, true
@@ -140,12 +189,23 @@ func StreamExtraFunc(chunk openaisdk.ChatCompletionChunk, yield func(fantasy.Str
 func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletionMessageParamUnion, []fantasy.CallWarning) {
 	var messages []openaisdk.ChatCompletionMessageParamUnion
 	var warnings []fantasy.CallWarning
-	hasReasoning := false
+	// Defer synthetic user messages holding tool-result media (see
+	// openai.ToolResultMediaMessages) until the contiguous run of tool
+	// messages ends: strict chat-completions validators require every
+	// tool message answering an assistant's tool_calls to immediately
+	// follow that assistant message.
+	var deferredMedia []openaisdk.ChatCompletionMessageParamUnion
 
 	for _, msg := range prompt {
+		if msg.Role != fantasy.MessageRoleTool && len(deferredMedia) > 0 {
+			messages = append(messages, deferredMedia...)
+			deferredMedia = nil
+		}
 		switch msg.Role {
 		case fantasy.MessageRoleSystem:
-			var systemPromptParts []string
+			var blocks []openaisdk.ChatCompletionContentPartTextParam
+			useArrayForm := false
+
 			for _, c := range msg.Content {
 				if c.GetType() != fantasy.ContentTypeText {
 					warnings = append(warnings, fantasy.CallWarning{
@@ -162,22 +222,38 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 					})
 					continue
 				}
-				text := textPart.Text
-				if strings.TrimSpace(text) != "" {
-					systemPromptParts = append(systemPromptParts, textPart.Text)
+				if strings.TrimSpace(textPart.Text) == "" {
+					continue
 				}
+
+				block, hasExtra := buildTextBlock(textPart.Text, textPart.ProviderOptions, msg.ProviderOptions)
+				useArrayForm = useArrayForm || hasExtra
+				blocks = append(blocks, *block)
 			}
-			if len(systemPromptParts) == 0 {
+
+			if len(blocks) == 0 {
 				warnings = append(warnings, fantasy.CallWarning{
 					Type:    fantasy.CallWarningTypeOther,
 					Message: "system prompt has no text parts",
 				})
 				continue
 			}
-			messages = append(messages, openaisdk.SystemMessage(strings.Join(systemPromptParts, "\n")))
+
+			if useArrayForm {
+				messages = append(messages, openaisdk.SystemMessage(blocks))
+			} else {
+				texts := make([]string, len(blocks))
+				for i, b := range blocks {
+					texts[i] = b.Text
+				}
+				messages = append(messages, openaisdk.SystemMessage(strings.Join(texts, "\n")))
+			}
 		case fantasy.MessageRoleUser:
-			// simple user message just text content
-			if len(msg.Content) == 1 && msg.Content[0].GetType() == fantasy.ContentTypeText {
+			// simple user message just text content. Messages carrying extra
+			// content fields fall through to the array path below, which applies
+			// them via buildTextBlock.
+			if len(msg.Content) == 1 && msg.Content[0].GetType() == fantasy.ContentTypeText &&
+				!hasContentExtraFields(msg.Content[0].Options(), msg.ProviderOptions) {
 				textPart, ok := fantasy.AsContentType[fantasy.TextPart](msg.Content[0])
 				if !ok {
 					warnings = append(warnings, fantasy.CallWarning{
@@ -202,10 +278,9 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 						})
 						continue
 					}
+					textBlock, _ := buildTextBlock(textPart.Text, textPart.ProviderOptions, msg.ProviderOptions)
 					content = append(content, openaisdk.ChatCompletionContentPartUnionParam{
-						OfText: &openaisdk.ChatCompletionContentPartTextParam{
-							Text: textPart.Text,
-						},
+						OfText: textBlock,
 					})
 				case fantasy.ContentTypeFile:
 					filePart, ok := fantasy.AsContentType[fantasy.FilePart](c)
@@ -322,13 +397,30 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 					})
 					continue
 				}
-				messages = append(messages, openaisdk.AssistantMessage(textPart.Text))
+				// Extra content fields (e.g. cache_control) require array form.
+				textBlock, hasExtra := buildTextBlock(textPart.Text, textPart.ProviderOptions, msg.ProviderOptions)
+				if hasExtra {
+					messages = append(messages, openaisdk.AssistantMessage([]openaisdk.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion{
+						{OfText: textBlock},
+					}))
+				} else {
+					messages = append(messages, openaisdk.AssistantMessage(textPart.Text))
+				}
 				continue
 			}
 			assistantMsg := openaisdk.ChatCompletionAssistantMessageParam{
 				Role: "assistant",
 			}
-			var reasoningText string
+			// A turn may carry several reasoning or text segments (a model that
+			// reasons, speaks, then reasons again). Concatenate in order rather
+			// than last-write-wins so no segment is silently dropped (F2,
+			// CHARM-2020). Text segments are collected as ordered blocks; the
+			// string form is used only for a single segment with no extra
+			// fields, so mixed plain/extra turns keep their original order.
+			var reasoningTexts []string
+			reasoningPresent := false
+			var textBlocks []openaisdk.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion
+			textHasExtra := false
 			for _, c := range msg.Content {
 				switch c.GetType() {
 				case fantasy.ContentTypeText:
@@ -340,9 +432,11 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 						})
 						continue
 					}
-					assistantMsg.Content = openaisdk.ChatCompletionAssistantMessageParamContentUnion{
-						OfString: param.NewOpt(textPart.Text),
-					}
+					textBlock, hasExtra := buildTextBlock(textPart.Text, textPart.ProviderOptions, msg.ProviderOptions)
+					textHasExtra = textHasExtra || hasExtra
+					textBlocks = append(textBlocks, openaisdk.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion{
+						OfText: textBlock,
+					})
 				case fantasy.ContentTypeReasoning:
 					reasoningPart, ok := fantasy.AsContentType[fantasy.ReasoningPart](c)
 					if !ok {
@@ -352,8 +446,8 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 						})
 						continue
 					}
-					reasoningText = reasoningPart.Text
-					hasReasoning = true
+					reasoningTexts = append(reasoningTexts, reasoningPart.Text)
+					reasoningPresent = true
 				case fantasy.ContentTypeToolCall:
 					toolCallPart, ok := fantasy.AsContentType[fantasy.ToolCallPart](c)
 					if !ok {
@@ -376,12 +470,30 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 						})
 				}
 			}
-			// Add reasoning_content field if present, or if thinking is enabled
-			// and the message has tool calls (some providers like Kimi require
-			// reasoning_content on all assistant messages when thinking is enabled).
-			if reasoningText != "" || (hasReasoning && len(assistantMsg.ToolCalls) > 0) {
+			// Text: when no segment carries extra fields, join into the string
+			// form; otherwise emit the ordered blocks one per segment so mixed
+			// plain/extra turns keep their original order.
+			if len(textBlocks) > 0 && !textHasExtra {
+				texts := make([]string, len(textBlocks))
+				for i, b := range textBlocks {
+					texts[i] = b.OfText.Text
+				}
+				assistantMsg.Content = openaisdk.ChatCompletionAssistantMessageParamContentUnion{
+					OfString: param.NewOpt(strings.Join(texts, "\n")),
+				}
+			} else if len(textBlocks) > 0 {
+				assistantMsg.Content = openaisdk.ChatCompletionAssistantMessageParamContentUnion{
+					OfArrayOfContentParts: textBlocks,
+				}
+			}
+			// Add reasoning_content field if the message carries a reasoning
+			// part, even when its text is empty: presence must mirror what the
+			// model emitted so resubmitted history stays byte-stable for prefix
+			// caching. Providers like Kimi require the field on assistant
+			// tool-call messages when thinking is enabled.
+			if reasoningPresent {
 				assistantMsg.SetExtraFields(map[string]any{
-					"reasoning_content": reasoningText,
+					"reasoning_content": strings.Join(reasoningTexts, "\n"),
 				})
 			}
 			if !hasVisibleCompatAssistantContent(&assistantMsg) {
@@ -434,12 +546,40 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 						continue
 					}
 					messages = append(messages, openaisdk.ToolMessage(output.Error.Error(), toolResultPart.ToolCallID))
+				case fantasy.ToolResultContentTypeMedia:
+					output, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](toolResultPart.Output)
+					if !ok {
+						warnings = append(warnings, fantasy.CallWarning{
+							Type:    fantasy.CallWarningTypeOther,
+							Message: "tool result output does not have the right type",
+						})
+						continue
+					}
+					// OpenAI-compatible chat completions tool messages cannot
+					// carry image or audio content directly; the SDK's content
+					// union only accepts text. Reuse the openai provider's
+					// helper, which splits the text tool message from the
+					// synthetic user message holding the media.
+					toolMessage, mediaMessages, mediaWarnings := openai.ToolResultMediaMessages(output, toolResultPart.ToolCallID)
+					messages = append(messages, toolMessage)
+					deferredMedia = append(deferredMedia, mediaMessages...)
+					warnings = append(warnings, mediaWarnings...)
+				default:
+					warnings = append(warnings, fantasy.CallWarning{
+						Type:    fantasy.CallWarningTypeOther,
+						Message: fmt.Sprintf("tool result output type %q not supported", toolResultPart.Output.GetType()),
+					})
 				}
 			}
 		}
 	}
+	messages = append(messages, deferredMedia...)
 	return messages, warnings
 }
+
+// toolResultMediaUserPart maps a tool-result media output to an OpenAI chat
+// completions user content part. It returns the content part, an optional
+// warning, and whether the caller should emit the returned part.
 
 func hasVisibleCompatUserContent(content []openaisdk.ChatCompletionContentPartUnionParam) bool {
 	for _, part := range content {
@@ -459,5 +599,13 @@ func hasVisibleCompatAssistantContent(msg *openaisdk.ChatCompletionAssistantMess
 	if len(msg.ToolCalls) > 0 {
 		return true
 	}
+	// A reasoning-only turn is not visible: it carries neither content nor
+	// tool calls, and strict OpenAI-compatible upstreams reject such
+	// messages outright ("content or tool_calls must be set"), failing every
+	// subsequent request once one lands in history (charmbracelet/crush#3794).
+	// The DeepSeek/Kimi replay contract only requires reasoning_content on
+	// turns that also carry content or tool calls, which pass the checks
+	// above; a bare reasoning turn is a truncated or canceled turn with no
+	// completion to resume from, so dropping it is safe.
 	return false
 }

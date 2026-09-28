@@ -295,15 +295,24 @@ func languageModelStreamExtra(chunk openaisdk.ChatCompletionChunk, yield func(fa
 
 		currentState.format = detail.Format
 		ctx[reasoningStartedCtx] = currentState
+		if !yield(fantasy.StreamPart{
+			Type:             fantasy.StreamPartTypeReasoningStart,
+			ID:               fmt.Sprintf("%d", inx),
+			ProviderMetadata: metadata,
+		}) {
+			return ctx, false
+		}
 		delta := detail.Summary
 		if xstrings.ContainsAnyOf(detail.Format, "google-gemini", "anthropic-claude") {
 			delta = detail.Text
 		}
+		if delta == "" {
+			return ctx, true
+		}
 		return ctx, yield(fantasy.StreamPart{
-			Type:             fantasy.StreamPartTypeReasoningStart,
-			ID:               fmt.Sprintf("%d", inx),
-			Delta:            delta,
-			ProviderMetadata: metadata,
+			Type:  fantasy.StreamPartTypeReasoningDelta,
+			ID:    fmt.Sprintf("%d", inx),
+			Delta: delta,
 		})
 	}
 	if len(reasoningData.ReasoningDetails) == 0 {
@@ -446,10 +455,18 @@ func languageModelUsage(response openaisdk.ChatCompletion) (fantasy.Usage, fanta
 		Usage:    openrouterUsage,
 	}
 
+	// OpenRouter reports prompt_tokens INCLUDING cached tokens. Subtract to avoid double-counting.
+	inputTokens := max(usage.PromptTokens-promptTokenDetails.CachedTokens, 0)
+	outputTokens, totalTokens := openai.FoldDisjointReasoning(
+		usage.CompletionTokens,
+		completionTokenDetails.ReasoningTokens,
+		inputTokens+usage.CompletionTokens+promptTokenDetails.CachedTokens,
+	)
+
 	return fantasy.Usage{
-		InputTokens:     usage.PromptTokens,
-		OutputTokens:    usage.CompletionTokens,
-		TotalTokens:     usage.TotalTokens,
+		InputTokens:     inputTokens,
+		OutputTokens:    outputTokens,
+		TotalTokens:     totalTokens,
 		ReasoningTokens: completionTokenDetails.ReasoningTokens,
 		CacheReadTokens: promptTokenDetails.CachedTokens,
 	}, providerMetadata
@@ -481,10 +498,19 @@ func languageModelStreamUsage(chunk openaisdk.ChatCompletionChunk, _ map[string]
 	// we do this here because the acc does not add prompt details
 	completionTokenDetails := usage.CompletionTokensDetails
 	promptTokenDetails := usage.PromptTokensDetails
+
+	// OpenRouter reports prompt_tokens INCLUDING cached tokens. Subtract to avoid double-counting.
+	inputTokens := max(usage.PromptTokens-promptTokenDetails.CachedTokens, 0)
+	outputTokens, totalTokens := openai.FoldDisjointReasoning(
+		usage.CompletionTokens,
+		completionTokenDetails.ReasoningTokens,
+		inputTokens+usage.CompletionTokens+promptTokenDetails.CachedTokens,
+	)
+
 	aiUsage := fantasy.Usage{
-		InputTokens:     usage.PromptTokens,
-		OutputTokens:    usage.CompletionTokens,
-		TotalTokens:     usage.TotalTokens,
+		InputTokens:     inputTokens,
+		OutputTokens:    outputTokens,
+		TotalTokens:     totalTokens,
 		ReasoningTokens: completionTokenDetails.ReasoningTokens,
 		CacheReadTokens: promptTokenDetails.CachedTokens,
 	}
