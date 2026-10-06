@@ -64,11 +64,11 @@ fmt.Println(result.Response.Content.Text())
 
 Yeah! Fantasy is designed to support a wide variety of providers and models under a single API. While many providers such as Microsoft Azure, Amazon Bedrock, and OpenRouter have dedicated packages in Fantasy, many others work just fine with `openaicompat`, the generic OpenAI-compatible layer. That said, if you find a provider that’s not compatible and needs special treatment, please let us know in an issue (or open a PR).
 
-## Decision models (Jev, Kev)
+## Decision models (Jev, Kev, Clef)
 
-Beyond chat and embeddings, Fantasy supports *evaluation* models such as TypeSafe's [Jev](https://docs.typesafe.ai) and the open-weight [Kev](https://github.com/jaredpalmer/kev).
+Beyond chat and embeddings, Fantasy supports *evaluation* models such as TypeSafe's [Jev](https://docs.typesafe.ai), the open-weight [Kev](https://github.com/jaredpalmer/kev), and Cloudflare's [Clef](https://huggingface.co/Cloudflare/clef).
 These answer typed questions about a state with calibrated probabilities instead of generating text.
-Providers that support them implement `fantasy.EvaluationProvider`: `providers/vercel` (AI Gateway, model `typesafe-ai/jev`), `providers/typesafe` (native API, or a running Kev server via `WithBaseURL`), and `providers/kev` (Kev fully in-process via llama.cpp, weights downloaded on first use).
+Providers that support them implement `fantasy.EvaluationProvider`: `providers/vercel` (AI Gateway, model `typesafe-ai/jev`), `providers/typesafe` (native API, or a running Kev server via `WithBaseURL`), `providers/kev` (Kev fully in-process via llama.cpp, weights downloaded on first use), and `providers/cloudflare` (Clef and Clef-Flash on Workers AI; `WithAccountID`, or `WithBaseURL` for an AI Gateway).
 
 ```go
 ep := provider.(fantasy.EvaluationProvider)

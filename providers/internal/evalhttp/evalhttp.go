@@ -157,6 +157,11 @@ func errorMessage(body []byte, status string) string {
 		Error   any    `json:"error"`
 		Message string `json:"message"`
 		Detail  any    `json:"detail"`
+		// Errors is the Cloudflare API envelope's list of failures.
+		Errors []struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 	if err := json.Unmarshal(body, &envelope); err == nil {
 		switch errVal := envelope.Error.(type) {
@@ -171,6 +176,22 @@ func errorMessage(body []byte, status string) string {
 		}
 		if envelope.Message != "" {
 			return envelope.Message
+		}
+		if len(envelope.Errors) > 0 {
+			parts := make([]string, 0, len(envelope.Errors))
+			for _, entry := range envelope.Errors {
+				if entry.Message == "" {
+					continue
+				}
+				if entry.Code != 0 {
+					parts = append(parts, fmt.Sprintf("%d: %s", entry.Code, entry.Message))
+					continue
+				}
+				parts = append(parts, entry.Message)
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "; ")
+			}
 		}
 		if envelope.Detail != nil {
 			if detail, err := json.Marshal(envelope.Detail); err == nil {
