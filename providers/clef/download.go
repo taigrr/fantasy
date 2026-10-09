@@ -1,4 +1,4 @@
-package kev
+package clef
 
 import (
 	"context"
@@ -7,31 +7,29 @@ import (
 	"github.com/taigrr/fantasy/providers/internal/localgguf"
 )
 
-// Checkpoint names a published Kev bundle: a GGUF with the LoRA merged in,
-// a head.json with the pointer head, and a manifest with checksums.
+// Checkpoint names a published Clef bundle: one GGUF holding the merged
+// backbone and the joint schema head as a llama.cpp decision model, plus a
+// manifest with checksums.
 type Checkpoint string
 
-// Published checkpoints. Larger is more accurate and better calibrated;
-// 0.8B is the only one that is quick on a laptop CPU.
+// Published checkpoints.
 const (
-	Checkpoint0_8B Checkpoint = "kev-0.8b"
-	Checkpoint4B   Checkpoint = "kev-4b"
-	Checkpoint9B   Checkpoint = "kev-9b"
+	// CheckpointFlash is Clef-Flash, the 9B model, stored Q8_0 (9.7 GB).
+	CheckpointFlash Checkpoint = "clef-flash"
 
-	// DefaultCheckpoint balances speed and accuracy for local use.
-	DefaultCheckpoint = Checkpoint4B
+	// DefaultCheckpoint is the one that fits a workstation.
+	DefaultCheckpoint = CheckpointFlash
 
 	// DefaultRepoOwner is the Hugging Face account hosting the GGUF bundles.
 	DefaultRepoOwner = localgguf.DefaultRepoOwner
 	// EnvCacheDir overrides the download location.
-	EnvCacheDir = "KEV_CACHE"
+	EnvCacheDir = "CLEF_CACHE"
 	// EnvHFEndpoint overrides the Hugging Face host (mirrors, offline caches).
 	EnvHFEndpoint = localgguf.EnvHFEndpoint
 	// EnvHFToken supplies a token for private repos or higher rate limits.
 	EnvHFToken = localgguf.EnvHFToken
 
-	cacheSubdir  = "kev"
-	manifestName = localgguf.ManifestName
+	cacheSubdir = "clef"
 )
 
 // Sentinel errors for checkpoint downloads.
@@ -39,8 +37,7 @@ var (
 	// ErrChecksum means a bundle file does not match its manifest.
 	ErrChecksum = localgguf.ErrChecksum
 	// ErrManifestUntrusted means a bundle manifest does not hash to the
-	// digest compiled into this package for that checkpoint. Nothing from
-	// it is used.
+	// digest compiled into this package for that checkpoint.
 	ErrManifestUntrusted = localgguf.ErrManifestUntrusted
 	// ErrUnknownCheckpoint means the checkpoint is neither a published name
 	// with a pinned manifest digest nor a local bundle directory.
@@ -50,20 +47,14 @@ var (
 )
 
 // manifestDigests pins the SHA-256 of manifest.json for each published
-// checkpoint, so the module itself is the trust root for the weights: a
-// manifest served from Hugging Face is only used if it hashes to the value
-// here, and every file it lists is then verified against it.
-//
-// Regenerate with tools/kev-convert after re-converting a checkpoint.
+// checkpoint. Regenerate with gojev/tools/clef-convert after re-converting.
 var manifestDigests = map[Checkpoint]string{
-	Checkpoint0_8B: "54e0407e5538c27d269d3d8767cc1907cd0302c6036e331fe982a795124c3277",
-	Checkpoint4B:   "6e202eeafa5260b6cbcbdf3ff318cfd15dee11ea7058e304f107b5c338fb21bc",
-	Checkpoint9B:   "9b28675b631ad9631fceb2321d16bcc83a147683cfb7d6722e96e5a983d8dd17",
+	CheckpointFlash: "",
 }
 
 // Checkpoints lists the published checkpoints this build knows how to verify.
 func Checkpoints() []Checkpoint {
-	return []Checkpoint{Checkpoint0_8B, Checkpoint4B, Checkpoint9B}
+	return []Checkpoint{CheckpointFlash}
 }
 
 // Manifest describes a bundle. It is written by the conversion script.
@@ -80,7 +71,7 @@ type Progress = localgguf.Progress
 
 // Downloader fetches checkpoint bundles into a local cache.
 type Downloader struct {
-	// CacheDir defaults to $KEV_CACHE, then $XDG_CACHE_HOME/kev or ~/.cache/kev.
+	// CacheDir defaults to $CLEF_CACHE, then $XDG_CACHE_HOME/clef or ~/.cache/clef.
 	CacheDir string
 	// RepoOwner defaults to DefaultRepoOwner; the repo is <owner>/<checkpoint>-gguf.
 	RepoOwner string
@@ -118,7 +109,7 @@ func (d *Downloader) manifestDigest(ckpt Checkpoint) (string, bool) {
 		}
 	}
 	digest, ok := manifestDigests[ckpt]
-	return digest, ok
+	return digest, ok && digest != ""
 }
 
 func (d *Downloader) shared(ckpt Checkpoint) (*localgguf.Downloader, error) {

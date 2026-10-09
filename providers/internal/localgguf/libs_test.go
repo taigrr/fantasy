@@ -1,4 +1,4 @@
-package kev
+package localgguf
 
 import (
 	"context"
@@ -14,12 +14,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testProcessorEnv = "LOCALGGUF_TEST_PROCESSOR"
+
 // These tests exercise EnsureLibraries against a real, verified install and
 // deliberately damaged copies of it. They need the pinned release present
 // (run the integration test once) and are skipped otherwise.
 func installedLibDir(t *testing.T) string {
 	t.Helper()
-	dir, err := LibDir()
+	dir, err := DefaultLibDir("KEV_CACHE")
 	require.NoError(t, err)
 	if _, err := download.ReadInstallRecord(dir); err != nil {
 		t.Skipf("no verified llama.cpp install at %s; run the integration test first", dir)
@@ -58,7 +60,7 @@ func TestEnsureLibraries_VerifiedInstallIsOfflineFastPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	start := time.Now()
-	status, err := EnsureLibraries(ctx, dir, ProcessorAuto, false)
+	status, err := EnsureLibraries(ctx, dir, ProcessorAuto, testProcessorEnv, false)
 	require.NoError(t, err)
 	require.True(t, status.Verified)
 	require.False(t, status.Installed)
@@ -67,7 +69,7 @@ func TestEnsureLibraries_VerifiedInstallIsOfflineFastPath(t *testing.T) {
 
 func TestEnsureLibraries_MissingWithoutAutoInstall(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "libs")
-	_, err := EnsureLibraries(context.Background(), dir, ProcessorCPU, false)
+	_, err := EnsureLibraries(context.Background(), dir, ProcessorCPU, testProcessorEnv, false)
 	require.ErrorIs(t, err, ErrLibrariesMissing)
 }
 
@@ -86,7 +88,7 @@ func TestEnsureLibraries_DetectsTamperedLibrary(t *testing.T) {
 	data[len(data)/2] ^= 0xff
 	require.NoError(t, os.WriteFile(lib, data, 0o600))
 
-	_, err = EnsureLibraries(context.Background(), dir, ProcessorAuto, false)
+	_, err = EnsureLibraries(context.Background(), dir, ProcessorAuto, testProcessorEnv, false)
 	require.ErrorIs(t, err, ErrLibrariesCorrupt)
 	require.Contains(t, err.Error(), "changed")
 }
@@ -105,7 +107,7 @@ func TestEnsureLibraries_DetectsDeletedFile(t *testing.T) {
 	require.NotEmpty(t, report.Files)
 	require.NoError(t, os.Remove(filepath.Join(dir, report.Files[len(report.Files)-1].Name)))
 
-	_, err = EnsureLibraries(context.Background(), dir, ProcessorAuto, false)
+	_, err = EnsureLibraries(context.Background(), dir, ProcessorAuto, testProcessorEnv, false)
 	require.ErrorIs(t, err, ErrLibrariesCorrupt)
 	require.Contains(t, err.Error(), "missing")
 }
@@ -139,7 +141,7 @@ func TestEnsureLibraries_ForgedManifestCannotLaunderTamperedLibrary(t *testing.T
 	manifest = []byte(strings.ReplaceAll(string(manifest), realDigest, forged))
 	require.NoError(t, os.WriteFile(manifestPath, manifest, 0o600))
 
-	_, err = EnsureLibraries(context.Background(), dir, ProcessorAuto, false)
+	_, err = EnsureLibraries(context.Background(), dir, ProcessorAuto, testProcessorEnv, false)
 	require.ErrorIs(t, err, ErrLibrariesCorrupt, "forged manifest must not launder a tampered library")
 }
 
@@ -176,10 +178,10 @@ func TestEnsureLibraries_ReplacesStaleTagInPlace(t *testing.T) {
 	}
 	require.NoError(t, os.WriteFile(lib, []byte("old release"), 0o600))
 
-	_, err = EnsureLibraries(context.Background(), dir, ProcessorAuto, false)
+	_, err = EnsureLibraries(context.Background(), dir, ProcessorAuto, testProcessorEnv, false)
 	require.ErrorIs(t, err, ErrLibrariesOutdated)
 
-	status, err := EnsureLibraries(context.Background(), dir, ProcessorAuto, true)
+	status, err := EnsureLibraries(context.Background(), dir, ProcessorAuto, testProcessorEnv, true)
 	require.NoError(t, err)
 	require.True(t, status.Installed)
 	require.True(t, status.Verified)
@@ -191,8 +193,8 @@ func TestEnsureLibraries_ReplacesStaleTagInPlace(t *testing.T) {
 }
 
 func TestDetectProcessorHonoursEnv(t *testing.T) {
-	t.Setenv(EnvProcessor, "VULKAN")
-	require.Equal(t, ProcessorVulkan, detectProcessor())
-	t.Setenv(EnvProcessor, "")
-	require.NotEqual(t, ProcessorAuto, detectProcessor())
+	t.Setenv(testProcessorEnv, "VULKAN")
+	require.Equal(t, ProcessorVulkan, DetectProcessor(testProcessorEnv))
+	t.Setenv(testProcessorEnv, "")
+	require.NotEqual(t, ProcessorAuto, DetectProcessor(testProcessorEnv))
 }
