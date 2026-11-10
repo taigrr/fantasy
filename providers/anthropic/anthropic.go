@@ -59,6 +59,10 @@ func thinkingDisplay(providerOptions *ProviderOptions, modelID string) (Thinking
 var adaptiveOnlyThinkingFamilies = []string{
 	"claude-mythos-preview",
 	"claude-opus-5-5",
+	"claude-fable-5-1",
+	"claude-fable-5-2",
+	"claude-mythos-5-1",
+	"claude-mythos-5-2",
 }
 
 // defaultsToAdaptiveThinking reports whether the model must always be sent
@@ -95,6 +99,28 @@ func rejectsForcedToolChoice(model string) bool {
 // budget_tokens configuration and must be sent adaptive thinking instead.
 func requiresAdaptiveThinking(model string) bool {
 	return defaultsToAdaptiveThinking(model) || defaultsToOmittedOpusThinkingDisplay(model)
+}
+
+// ThinkingBindingControlsBeta is the beta that enables
+// `thinking.block_binding`. See
+// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+const ThinkingBindingControlsBeta = "thinking-binding-controls-2026-08-01"
+
+// newAdaptiveThinking builds an adaptive thinking config that asks the API
+// to drop, rather than reject, replayed thinking blocks whose signature is
+// bound to a different prefix (system, tools, or earlier messages). The
+// block_binding field is only accepted with adaptive thinking, never with
+// `type: enabled`.
+func newAdaptiveThinking(providerOptions *ProviderOptions, modelID string) *anthropic.ThinkingConfigAdaptiveParam {
+	adaptive := &anthropic.ThinkingConfigAdaptiveParam{}
+	fields := map[string]any{
+		"block_binding": map[string]any{"prefix_mismatch_behavior": "drop_block"},
+	}
+	if display, ok := thinkingDisplay(providerOptions, modelID); ok {
+		fields["display"] = string(display)
+	}
+	adaptive.SetExtraFields(fields)
+	return adaptive
 }
 
 func setThinkingDisplay(param interface{ SetExtraFields(map[string]any) }, display ThinkingDisplay) {
@@ -491,27 +517,22 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 		params.TopP = param.NewOpt(*call.TopP)
 	}
 
+	usesAdaptive := false
 	switch {
 	case providerOptions.Effort != nil:
 		effort := *providerOptions.Effort
 		params.OutputConfig = anthropic.OutputConfigParam{
 			Effort: anthropic.OutputConfigEffort(effort),
 		}
-		adaptive := anthropic.ThinkingConfigAdaptiveParam{}
-		if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
-			setThinkingDisplay(&adaptive, display)
-		}
-		params.Thinking.OfAdaptive = &adaptive
+		params.Thinking.OfAdaptive = newAdaptiveThinking(providerOptions, a.modelID)
+		usesAdaptive = true
 	case providerOptions.Thinking != nil:
 		if providerOptions.Thinking.BudgetTokens == 0 {
 			return nil, nil, nil, nil, &fantasy.Error{Title: "no budget", Message: "thinking requires budget"}
 		}
 		if requiresAdaptiveThinking(a.modelID) {
-			adaptive := anthropic.ThinkingConfigAdaptiveParam{}
-			if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
-				setThinkingDisplay(&adaptive, display)
-			}
-			params.Thinking.OfAdaptive = &adaptive
+			params.Thinking.OfAdaptive = newAdaptiveThinking(providerOptions, a.modelID)
+			usesAdaptive = true
 		} else {
 			params.Thinking = anthropic.ThinkingConfigParamOfEnabled(providerOptions.Thinking.BudgetTokens)
 			if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
@@ -520,11 +541,12 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 		}
 		warnings = stripSamplingParams(params, call, warnings, "when thinking is enabled")
 	case defaultsToAdaptiveThinking(a.modelID):
-		adaptive := anthropic.ThinkingConfigAdaptiveParam{}
-		if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
-			setThinkingDisplay(&adaptive, display)
-		}
-		params.Thinking.OfAdaptive = &adaptive
+		params.Thinking.OfAdaptive = newAdaptiveThinking(providerOptions, a.modelID)
+		usesAdaptive = true
+	}
+
+	if usesAdaptive && !slices.Contains(betaFlags, ThinkingBindingControlsBeta) {
+		betaFlags = append(betaFlags, ThinkingBindingControlsBeta)
 	}
 
 	// Adaptive-only models have thinking permanently on and reject any
@@ -541,7 +563,13 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 		}
 		var toolChoice *anthropic.ToolChoiceUnionParam
 		var toolWarnings []fantasy.CallWarning
-		rawTools, toolChoice, toolWarnings, betaFlags = a.toTools(call.Tools, call.ToolChoice, disableParallelToolUse)
+		var toolBetas []string
+		rawTools, toolChoice, toolWarnings, toolBetas = a.toTools(call.Tools, call.ToolChoice, disableParallelToolUse)
+		for _, flag := range toolBetas {
+			if !slices.Contains(betaFlags, flag) {
+				betaFlags = append(betaFlags, flag)
+			}
+		}
 		if toolChoice != nil {
 			params.ToolChoice = *toolChoice
 		}
