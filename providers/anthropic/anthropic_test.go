@@ -3449,3 +3449,142 @@ func TestAdaptiveOnlyModelsStripSamplingParams(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "adaptive", thinking["type"])
 }
+
+type bindingCapture struct {
+	header http.Header
+	body   map[string]any
+}
+
+func runBindingRequest(t *testing.T, modelID string, opts *ProviderOptions) bindingCapture {
+	t.Helper()
+	captured := make(chan bindingCapture, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		captured <- bindingCapture{header: r.Header.Clone(), body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_01",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       modelID,
+			"content":     []any{map[string]any{"type": "text", "text": "ok"}},
+			"stop_reason": "end_turn",
+			"usage":       map[string]any{"input_tokens": 1, "output_tokens": 1},
+		})
+	}))
+	defer server.Close()
+
+	provider, err := New(WithAPIKey("test-api-key"), WithBaseURL(server.URL))
+	require.NoError(t, err)
+	model, err := provider.LanguageModel(context.Background(), modelID)
+	require.NoError(t, err)
+
+	call := fantasy.Call{Prompt: testPrompt()}
+	if opts != nil {
+		call.ProviderOptions = NewProviderOptions(opts)
+	}
+	_, err = model.Generate(context.Background(), call)
+	require.NoError(t, err)
+	return <-captured
+}
+
+func betaValues(header http.Header) []string {
+	var values []string
+	for _, value := range header.Values("Anthropic-Beta") {
+		for part := range strings.SplitSeq(value, ",") {
+			values = append(values, strings.TrimSpace(part))
+		}
+	}
+	return values
+}
+
+func TestAdaptiveThinkingDropsMismatchedBlocks(t *testing.T) {
+	t.Parallel()
+
+	effort := EffortHigh
+	cases := []struct {
+		name  string
+		model string
+		opts  *ProviderOptions
+	}{
+		{name: "fable 5.2 default", model: "claude-fable-5-2"},
+		{name: "mythos 5.1 default", model: "claude-mythos-5-1"},
+		{name: "opus 5.5 effort", model: "claude-opus-5-5", opts: &ProviderOptions{Effort: &effort}},
+		{name: "fable 5.2 budget rewritten", model: "claude-fable-5-2", opts: &ProviderOptions{Thinking: &ThinkingProviderOption{BudgetTokens: 2048}}},
+		{name: "sonnet 5 effort", model: "claude-sonnet-5", opts: &ProviderOptions{Effort: &effort}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := runBindingRequest(t, tc.model, tc.opts)
+			thinking, ok := got.body["thinking"].(map[string]any)
+			require.True(t, ok, "thinking missing: %v", got.body)
+			require.Equal(t, "adaptive", thinking["type"])
+			binding, ok := thinking["block_binding"].(map[string]any)
+			require.True(t, ok, "block_binding missing: %v", thinking)
+			require.Equal(t, "drop_block", binding["prefix_mismatch_behavior"])
+			require.Contains(t, betaValues(got.header), ThinkingBindingControlsBeta)
+		})
+	}
+}
+
+func TestAdaptiveThinkingKeepsDisplayWithBinding(t *testing.T) {
+	t.Parallel()
+
+	display := ThinkingDisplayOmitted
+	got := runBindingRequest(t, "claude-fable-5-2", &ProviderOptions{ThinkingDisplay: &display})
+	thinking := got.body["thinking"].(map[string]any)
+	require.Equal(t, "omitted", thinking["display"])
+	require.Contains(t, thinking, "block_binding")
+}
+
+func TestEnabledThinkingOmitsBlockBinding(t *testing.T) {
+	t.Parallel()
+
+	got := runBindingRequest(t, "claude-sonnet-4-20250514", &ProviderOptions{
+		Thinking: &ThinkingProviderOption{BudgetTokens: 2048},
+	})
+	thinking := got.body["thinking"].(map[string]any)
+	require.Equal(t, "enabled", thinking["type"])
+	require.NotContains(t, thinking, "block_binding")
+	require.NotContains(t, betaValues(got.header), ThinkingBindingControlsBeta)
+}
+
+func TestThinkingBindingBetaPreservesCallerBetas(t *testing.T) {
+	t.Parallel()
+
+	got := runBindingRequest(t, "claude-fable-5-2", &ProviderOptions{
+		Betas: []string{"context-1m-2025-08-07", ThinkingBindingControlsBeta},
+	})
+	betas := betaValues(got.header)
+	require.Contains(t, betas, "context-1m-2025-08-07")
+	count := 0
+	for _, beta := range betas {
+		if beta == ThinkingBindingControlsBeta {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "beta must not be duplicated: %v", betas)
+}
+
+func TestCallerExtraBodyOverridesBlockBinding(t *testing.T) {
+	t.Parallel()
+
+	got := runBindingRequest(t, "claude-fable-5-2", &ProviderOptions{
+		ExtraBody: map[string]any{"thinking.block_binding.prefix_mismatch_behavior": "error"},
+	})
+	binding := got.body["thinking"].(map[string]any)["block_binding"].(map[string]any)
+	require.Equal(t, "error", binding["prefix_mismatch_behavior"])
+}
+
+func TestFable52RequiresAdaptiveThinking(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"claude-fable-5-2", "claude-fable-5-1", "claude-mythos-5-2", "claude-mythos-5-1", "us.anthropic.claude-fable-5-2"} {
+		require.True(t, defaultsToAdaptiveThinking(model), model)
+		require.True(t, requiresAdaptiveThinking(model), model)
+	}
+	require.False(t, defaultsToAdaptiveThinking("claude-fable-5"))
+	require.False(t, defaultsToAdaptiveThinking("claude-sonnet-5-5"))
+}
